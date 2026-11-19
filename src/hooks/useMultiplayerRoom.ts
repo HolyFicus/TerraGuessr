@@ -181,10 +181,31 @@ export function useMultiplayerRoom(
         });
 
         peer.on('connection', (conn) => {
+          // Security: cap concurrent incoming connections on host to prevent resource exhaustion
+          if (Object.keys(hostConnectionsRef.current).length >= 12) {
+            try {
+              conn.close();
+            } catch {
+              // Ignore
+            }
+            return;
+          }
+
           // Security: bind each WebRTC DataConnection strictly to ONE verified playerId
           let boundPlayerId: string | null = null;
+          // Lightweight sliding-window packet rate limiter (max 25 packets / 5s)
+          let windowStart = Date.now();
+          let packetCount = 0;
 
           conn.on('data', (raw) => {
+            const now = Date.now();
+            if (now - windowStart > 5000) {
+              windowStart = now;
+              packetCount = 0;
+            }
+            packetCount += 1;
+            if (packetCount > 25) return;
+
             const activeRoom = hostRoomRef.current;
             if (!activeRoom || !raw || typeof raw !== 'object') return;
             const msg = raw as Record<string, unknown>;
@@ -266,7 +287,11 @@ export function useMultiplayerRoom(
               if (hostConnectionsRef.current[boundPlayerId] === conn) {
                 delete hostConnectionsRef.current[boundPlayerId];
               }
-              disconnectPlayer(hostRoomRef.current, boundPlayerId);
+              disconnectPlayer(
+                hostRoomRef.current,
+                boundPlayerId,
+                distanceFnRef.current,
+              );
               broadcastFromHost();
             }
           });

@@ -13,6 +13,10 @@ export type MovementMode = 'moving' | 'no_move' | 'nmpz';
 
 export type MapLayerType = 'roadmap' | 'satellite';
 
+export type PanoramaProvider = 'google' | 'panoramax' | 'mapillary' | 'offline';
+
+export type PanoramaPreference = 'auto' | 'google' | 'panoramax' | 'mapillary';
+
 export type AppScreenState =
   | 'title'
   | 'lobby'
@@ -57,6 +61,13 @@ export interface RoundLocation {
   lat: number;
   lng: number;
   panoId?: string;
+  provider?: PanoramaProvider;
+  imageUrl?: string;
+  isEquirectangular?: boolean;
+  cameraAzimuth?: number;
+  nextStepUrl?: string;
+  prevStepUrl?: string;
+  attribution?: string;
   heading: number;
   pitch: number;
   hintLabel: string;

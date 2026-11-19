@@ -20,7 +20,19 @@ import {
   submitPlayerGuess,
   toPublicRoomState,
 } from './roomState';
-import { escapeHtml, sanitizeHexColor } from './sanitize';
+import {
+  escapeHtml,
+  isAllowedPanoramaHost,
+  sanitizeApiToken,
+  sanitizeHexColor,
+  sanitizePanoramaUrl,
+} from './sanitize';
+import {
+  buildFocusedBbox,
+  isAllowedPanoramaxStepUrl,
+  parseMapillaryImage,
+  parsePanoramaxFeature,
+} from './openPanoramaService';
 import {
   computeStatsSummary,
   getRegionBestMap,
@@ -435,3 +447,208 @@ test('duel 1v1 mode: 2-player cap, 6000 HP, 15s countdown, escalating multiplier
   assert.equal(pub.players[1].hp, 0);
   assert.equal(pub.roundHistory[0].duelDamage?.hpBefore?.pl_guest2222, 6000);
 });
+
+test('security: panorama URL allowlist and API token sanitization block SSRF, tracking pixels, and protocol bypasses', () => {
+  assert.equal(isAllowedPanoramaHost('panoramax.openstreetmap.fr'), true);
+  assert.equal(isAllowedPanoramaHost('api.panoramax.xyz'), true);
+  assert.equal(isAllowedPanoramaHost('scontent.fbcdn.net'), true);
+  assert.equal(isAllowedPanoramaHost('evil-panoramax.xyz'), false);
+  assert.equal(isAllowedPanoramaHost('panoramax.xyz.'), false);
+  assert.equal(isAllowedPanoramaHost('evil.com'), false);
+
+  assert.equal(
+    sanitizePanoramaUrl('https://panoramax.openstreetmap.fr/images/sd/abc.jpg'),
+    'https://panoramax.openstreetmap.fr/images/sd/abc.jpg',
+  );
+  assert.equal(
+    sanitizePanoramaUrl('http://panoramax.openstreetmap.fr/images/sd/abc.jpg'),
+    undefined,
+  );
+  assert.equal(sanitizePanoramaUrl('javascript:alert(1)'), undefined);
+  assert.equal(sanitizePanoramaUrl('data:image/svg+xml,<svg/>'), undefined);
+  assert.equal(sanitizePanoramaUrl('https://evil.com/pixel.jpg'), undefined);
+  assert.equal(
+    sanitizePanoramaUrl('https://user:pass@panoramax.xyz/api/items/1'),
+    undefined,
+  );
+  assert.equal(
+    sanitizePanoramaUrl('https://evil-panoramax.xyz/image.jpg'),
+    undefined,
+  );
+
+  assert.equal(sanitizeApiToken('  AIzaSy123\n\t '), 'AIzaSy123');
+  assert.equal(buildInviteLink('not-a-valid-url', 'GEO-7K4M9P'), '?join=GEO-7K4M9P');
+
+  assert.equal(
+    isAllowedPanoramaxStepUrl('https://panoramax.openstreetmap.fr/api/collections/c1/items/1'),
+    true,
+  );
+  assert.equal(
+    isAllowedPanoramaxStepUrl('https://panoramax.ign.fr/api/collections/c1/items/1'),
+    true,
+  );
+  assert.equal(
+    isAllowedPanoramaxStepUrl('https://scontent.fbcdn.net/v/t39/mly2048.jpg'),
+    false,
+  );
+  assert.equal(
+    isAllowedPanoramaxStepUrl('https://evil.com/api/items/1'),
+    false,
+  );
+});
+
+test('openPanoramaService parses valid Panoramax/Mapillary 360° frames and blocks prohibited territories & untrusted URLs', () => {
+  const bbox = buildFocusedBbox(48.85, 2.35, 0.5, 0.6);
+  assert.equal(bbox.length, 4);
+  assert.ok(bbox[0] < bbox[2] && bbox[1] < bbox[3]);
+
+  const validPmx = parsePanoramaxFeature({
+    id: 'item-paris-1',
+    geometry: { type: 'Point', coordinates: [2.3522, 48.8566] },
+    assets: {
+      sd: { href: 'https://panoramax.openstreetmap.fr/api/pictures/1/sd.jpg' },
+    },
+    properties: {
+      'view:azimuth': 405,
+      license: 'CC-BY-SA-4.0',
+      'pers:interior_orientation': { field_of_view: 360 },
+    },
+    links: [
+      { rel: 'next', href: 'https://api.panoramax.xyz/api/collections/c1/items/item-2' },
+      { rel: 'prev', href: 'https://evil.example.com/ssrf' },
+    ],
+  });
+  assert.ok(validPmx);
+  assert.equal(validPmx.isEquirectangular, true);
+  assert.equal(validPmx.cameraAzimuth, 45);
+  assert.equal(
+    validPmx.nextStepUrl,
+    'https://api.panoramax.xyz/api/collections/c1/items/item-2',
+  );
+  assert.equal(validPmx.prevStepUrl, undefined);
+
+  // Prohibited territory (Crimea) must be rejected even if Panoramax returns it
+  const crimeaPmx = parsePanoramaxFeature({
+    id: 'item-crimea',
+    geometry: { type: 'Point', coordinates: [34.1, 44.95] },
+    assets: {
+      sd: { href: 'https://panoramax.openstreetmap.fr/api/pictures/2/sd.jpg' },
+    },
+    properties: { 'pers:interior_orientation': { field_of_view: 360 } },
+  });
+  assert.equal(crimeaPmx, null);
+
+  // Untrusted image CDN rejected
+  const evilPmx = parsePanoramaxFeature({
+    id: 'item-evil',
+    geometry: { type: 'Point', coordinates: [2.35, 48.85] },
+    assets: { sd: { href: 'https://attacker.tld/spy.jpg' } },
+    properties: {},
+  });
+  assert.equal(evilPmx, null);
+
+  // Valid Mapillary 360° item
+  const validMly = parseMapillaryImage({
+    id: '987654321',
+    computed_geometry: { coordinates: [13.405, 52.52] },
+    thumb_2048_url: 'https://scontent.fbcdn.net/v/t39/mly2048.jpg',
+    is_pano: true,
+    computed_compass_angle: -30,
+  });
+  assert.ok(validMly);
+  assert.equal(validMly.isEquirectangular, true);
+  assert.equal(validMly.cameraAzimuth, 330);
+});
+
+test('P2P hybrid anti-cheat hides coordinates for Panoramax rounds and strips malicious remote URLs', () => {
+  const room = createRoom({
+    code: 'GEO-HYB123',
+    hostId: 'p1',
+    hostName: 'Хост',
+    regionId: 'europe',
+    totalRounds: 3,
+    timerSeconds: 0,
+    movementMode: 'moving',
+  });
+  joinRoom(room, 'p2', 'Гость');
+  startLocatingRound(room, 'p1');
+  setRoundLocation(room, 'p1', {
+    lat: 48.8566,
+    lng: 2.3522,
+    panoId: 'pmx_123',
+    provider: 'panoramax',
+    imageUrl: 'https://panoramax.openstreetmap.fr/api/pictures/1/sd.jpg',
+    isEquirectangular: true,
+    cameraAzimuth: 180,
+    nextStepUrl: 'https://api.panoramax.xyz/api/collections/c1/items/2',
+    attribution: 'Panoramax · CC-BY-SA-4.0',
+    heading: 90,
+    pitch: 0,
+    hintLabel: 'Франция',
+    countryCode: 'FR',
+    isLiveStreetView: true,
+  });
+
+  const pub = toPublicRoomState(room);
+  assert.equal(pub.currentLocation?.lat, 0);
+  assert.equal(pub.currentLocation?.lng, 0);
+  assert.equal(pub.currentLocation?.hintLabel, '');
+  assert.equal(pub.currentLocation?.countryCode, '');
+  assert.equal(pub.currentLocation?.provider, 'panoramax');
+  assert.equal(
+    pub.currentLocation?.imageUrl,
+    'https://panoramax.openstreetmap.fr/api/pictures/1/sd.jpg',
+  );
+
+  // Tampered P2P packet injecting evil URL is stripped cleanly by sanitizePublicRoomState
+  const tampered = {
+    ...pub,
+    currentLocation: {
+      ...pub.currentLocation!,
+      imageUrl: 'https://evil-tracker.com/steal-ip.jpg',
+      nextStepUrl: 'javascript:alert(1)',
+    },
+  };
+  const cleaned = sanitizePublicRoomState(tampered);
+  assert.ok(cleaned);
+  assert.equal(cleaned.currentLocation?.imageUrl, undefined);
+  assert.equal(cleaned.currentLocation?.nextStepUrl, undefined);
+});
+
+test('disconnectPlayer mid-round auto-finalizes when remaining connected players already guessed (no soft-lock)', () => {
+  const room = createRoom({
+    code: 'GEO-DISC01',
+    hostId: 'p1',
+    hostName: 'Алиса',
+    regionId: 'europe',
+    totalRounds: 3,
+    timerSeconds: 0,
+    movementMode: 'moving',
+  });
+  joinRoom(room, 'p2', 'Боб');
+  startLocatingRound(room, 'p1');
+  setRoundLocation(room, 'p1', {
+    lat: 48.8566,
+    lng: 2.3522,
+    panoId: 'pmx_disc',
+    provider: 'panoramax',
+    imageUrl: 'https://panoramax.openstreetmap.fr/api/pictures/disc/sd.jpg',
+    isEquirectangular: true,
+    heading: 0,
+    pitch: 0,
+    hintLabel: 'Франция',
+    countryCode: 'FR',
+    isLiveStreetView: true,
+  });
+
+  // Alice guesses, Bob disconnects before guessing -> round must finalize automatically
+  const g1 = submitPlayerGuess(room, 'p1', { lat: 48.8566, lng: 2.3522 }, 5);
+  assert.equal(g1.roundCompleted, false);
+  assert.equal(room.status, 'playing');
+
+  disconnectPlayer(room, 'p2');
+  assert.equal(room.status, 'round_result');
+  assert.equal(room.roundHistory.length, 1);
+  assert.equal(room.players.find((p) => p.id === 'p1')?.totalScore, 5000);
+});
+

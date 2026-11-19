@@ -21,6 +21,7 @@ import type {
   GameSettings,
   MovementMode,
   OnlineFormat,
+  PanoramaPreference,
   RegionMedalRecord,
 } from '../game/types';
 import { MedalIcon } from './MedalIcon';
@@ -34,8 +35,13 @@ interface TitleScreenProps {
   hasEnvMapsKey: boolean;
   savedCustomApiKey: string;
   apiKeySessionOnly: boolean;
+  hasEnvMapillaryToken: boolean;
+  savedMapillaryToken: string;
+  panoramaPreference: PanoramaPreference;
   openKeyPanelSignal?: number;
   onSaveCustomApiKey: (key: string, sessionOnly: boolean) => void;
+  onSaveMapillaryToken: (token: string, sessionOnly: boolean) => void;
+  onChangePanoramaPreference: (pref: PanoramaPreference) => void;
   onUpdateSettings: (patch: Partial<GameSettings>) => void;
   onStartLocalGame: () => void;
   onCreateOnlineRoom: (hostName: string) => void;
@@ -167,8 +173,13 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   hasEnvMapsKey,
   savedCustomApiKey,
   apiKeySessionOnly,
+  hasEnvMapillaryToken,
+  savedMapillaryToken,
+  panoramaPreference,
   openKeyPanelSignal = 0,
   onSaveCustomApiKey,
+  onSaveMapillaryToken,
+  onChangePanoramaPreference,
   onUpdateSettings,
   onStartLocalGame,
   onCreateOnlineRoom,
@@ -178,15 +189,20 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const [regionTab, setRegionTab] = useState<'region' | 'country'>('region');
   const [inviteInput, setInviteInput] = useState(joinCodeInitial);
   const [apiKeyInput, setApiKeyInput] = useState(savedCustomApiKey);
+  const [mapillaryInput, setMapillaryInput] = useState(savedMapillaryToken);
   const [sessionOnlyInput, setSessionOnlyInput] = useState(apiKeySessionOnly);
   const [apiKeySavedToast, setApiKeySavedToast] = useState(false);
-  const [showKeyPanel, setShowKeyPanel] = useState(!hasEnvMapsKey && !savedCustomApiKey);
+  const [showKeyPanel, setShowKeyPanel] = useState(false);
   const [onlineActionError, setOnlineActionError] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
     setApiKeyInput(savedCustomApiKey);
   }, [savedCustomApiKey]);
+
+  useEffect(() => {
+    setMapillaryInput(savedMapillaryToken);
+  }, [savedMapillaryToken]);
 
   useEffect(() => {
     setSessionOnlyInput(apiKeySessionOnly);
@@ -222,9 +238,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     setOnlineActionError(null);
   };
 
-  const handleSaveApiKey = (e: React.FormEvent) => {
+  const handleSaveKeys = (e: React.FormEvent) => {
     e.preventDefault();
     onSaveCustomApiKey(apiKeyInput.trim(), sessionOnlyInput);
+    onSaveMapillaryToken(mapillaryInput.trim(), sessionOnlyInput);
     setApiKeySavedToast(true);
     window.setTimeout(() => setApiKeySavedToast(false), 1800);
   };
@@ -295,6 +312,31 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   ];
 
   const activeMapsReady = hasEnvMapsKey || Boolean(savedCustomApiKey);
+  const activeMapillaryReady = hasEnvMapillaryToken || Boolean(savedMapillaryToken);
+
+  const effectiveSourceLabel =
+    panoramaPreference === 'panoramax'
+      ? 'Panoramax 360° (без ключа)'
+      : panoramaPreference === 'mapillary'
+        ? activeMapillaryReady
+          ? 'Mapillary 360°'
+          : 'Panoramax 360° (нужен токен Mapillary)'
+        : panoramaPreference === 'google'
+          ? activeMapsReady
+            ? 'Google Street View'
+            : 'Google (требуется ключ)'
+          : activeMapsReady
+            ? 'Авто · Google Street View'
+            : activeMapillaryReady
+              ? 'Авто · Mapillary 360°'
+              : 'Авто · Panoramax 360° (без ключа)';
+
+  const panoramaOptions: Array<{ id: PanoramaPreference; label: string }> = [
+    { id: 'auto', label: 'Авто (Гибрид)' },
+    { id: 'panoramax', label: 'Panoramax' },
+    { id: 'google', label: 'Google' },
+    { id: 'mapillary', label: 'Mapillary' },
+  ];
 
   const formatButtons: Array<{
     id: OnlineFormat;
@@ -358,16 +400,24 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               type="button"
               onClick={() => setShowKeyPanel((v) => !v)}
               aria-expanded={showKeyPanel}
-              aria-label="API-ключ Maps"
-              title="API-ключ Google Maps"
+              aria-label="Источники панорам"
+              title={`Источники панорам · ${effectiveSourceLabel}`}
               className={`inline-flex h-10 min-w-[40px] items-center justify-center gap-1.5 rounded-xl border px-3 text-xs font-medium whitespace-nowrap transition-colors landscape-phone:h-8 landscape-phone:min-w-[36px] ${
-                !activeMapsReady || showKeyPanel
+                showKeyPanel
                   ? 'border-amber-500/60 bg-amber-500/10 text-amber-300'
-                  : 'border-slate-800 bg-[#111A2E]/85 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  : 'border-slate-800 bg-[#111A2E]/85 text-slate-300 hover:border-slate-700 hover:text-white'
               }`}
             >
-              <KeyRound className="h-4 w-4 shrink-0" aria-hidden="true" />
-              {!activeMapsReady && <span>API</span>}
+              <KeyRound className="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+              <span className="hidden sm:inline">
+                {panoramaPreference === 'panoramax' ||
+                (panoramaPreference === 'auto' && !activeMapsReady && !activeMapillaryReady)
+                  ? 'Panoramax'
+                  : panoramaPreference === 'mapillary' ||
+                      (panoramaPreference === 'auto' && !activeMapsReady && activeMapillaryReady)
+                    ? 'Mapillary'
+                    : 'Street View'}
+              </span>
             </button>
 
             <button
@@ -387,14 +437,55 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           </div>
         </header>
 
-        {/* Optional API Key Bar */}
+        {/* Hybrid Panorama Sources & Optional API Keys Panel */}
         {showKeyPanel && (
           <form
-            onSubmit={handleSaveApiKey}
+            onSubmit={handleSaveKeys}
             autoComplete="off"
-            className="mt-3 flex flex-col gap-2 rounded-xl border border-slate-800 bg-[#111A2E]/95 p-3 landscape-phone:mt-2 landscape-phone:p-2"
+            data-testid="panorama-sources-panel"
+            className="mt-3 flex flex-col gap-2.5 rounded-xl border border-slate-800 bg-[#111A2E]/95 p-3 landscape-phone:mt-2 landscape-phone:p-2"
           >
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div
+                role="group"
+                aria-label="Источник панорам"
+                className="flex flex-wrap items-center gap-1 rounded-lg bg-[#0B1220] p-1"
+              >
+                {panoramaOptions.map((opt) => {
+                  const active = panoramaPreference === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => onChangePanoramaPreference(opt.id)}
+                      className={`h-8 cursor-pointer rounded-md px-2.5 text-xs font-semibold whitespace-nowrap transition-colors ${
+                        active
+                          ? 'bg-amber-500/20 text-amber-300'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-medium text-emerald-400">
+                  {effectiveSourceLabel}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowKeyPanel(false)}
+                  aria-label="Закрыть панель источников"
+                  className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <input
                 id="gmaps-api-key-input"
                 aria-label="GOOGLE_MAPS_API_KEY"
@@ -403,36 +494,22 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 spellCheck={false}
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder="GOOGLE_MAPS_API_KEY"
-                className="h-10 min-w-[180px] flex-1 rounded-lg border border-slate-700/80 bg-[#0B1220] px-3 font-mono text-xs text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none landscape-phone:h-8"
+                placeholder="Google Maps API Key (необязательно)"
+                className="h-9 w-full rounded-lg border border-slate-700/80 bg-[#0B1220] px-3 font-mono text-xs text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
               />
-              <button
-                type="submit"
-                className="inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 text-xs font-bold text-slate-950 whitespace-nowrap hover:bg-amber-400 landscape-phone:h-8"
-              >
-                {apiKeySavedToast ? <Check className="h-3.5 w-3.5" /> : <span>OK</span>}
-              </button>
-              {savedCustomApiKey && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setApiKeyInput('');
-                    onSaveCustomApiKey('', sessionOnlyInput);
-                  }}
-                  className="h-10 cursor-pointer rounded-lg border border-slate-700 px-3 text-xs text-slate-300 hover:bg-slate-800 landscape-phone:h-8"
-                >
-                  Сброс
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setShowKeyPanel(false)}
-                aria-label="Закрыть панель API-ключа"
-                className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white landscape-phone:h-8 landscape-phone:w-8"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <input
+                id="mapillary-token-input"
+                aria-label="MAPILLARY_TOKEN"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={mapillaryInput}
+                onChange={(e) => setMapillaryInput(e.target.value)}
+                placeholder="Mapillary Token MLY|... (бесплатно, без карты)"
+                className="h-9 w-full rounded-lg border border-slate-700/80 bg-[#0B1220] px-3 font-mono text-xs text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+              />
             </div>
+
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
               <label className="inline-flex cursor-pointer items-center gap-1.5 select-none">
                 <input
@@ -441,9 +518,38 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   onChange={(e) => setSessionOnlyInput(e.target.checked)}
                   className="h-3.5 w-3.5 accent-amber-500"
                 />
-                <span>Хранить только до закрытия вкладки</span>
+                <span>Хранить ключи только до закрытия вкладки</span>
               </label>
-              <span>Ограничьте ключ по HTTP Referrer в Google Cloud Console</span>
+
+              <div className="flex items-center gap-2">
+                {(savedCustomApiKey || savedMapillaryToken) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setApiKeyInput('');
+                      setMapillaryInput('');
+                      onSaveCustomApiKey('', sessionOnlyInput);
+                      onSaveMapillaryToken('', sessionOnlyInput);
+                    }}
+                    className="h-8 cursor-pointer rounded-lg border border-slate-700 px-3 text-xs text-slate-300 hover:bg-slate-800"
+                  >
+                    Сброс
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 text-xs font-bold text-slate-950 whitespace-nowrap hover:bg-amber-400"
+                >
+                  {apiKeySavedToast ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      <span>Сохранено</span>
+                    </>
+                  ) : (
+                    <span>Сохранить</span>
+                  )}
+                </button>
+              </div>
             </div>
           </form>
         )}
@@ -805,7 +911,15 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               ? 'Дуэль 1×1 · 6 000 HP · множитель с 5-го раунда'
               : `${settings.totalRounds} ${pluralRoundsRu(settings.totalRounds)} · до ${formatScore(settings.totalRounds * MAX_ROUND_SCORE)}`}
           </span>
-          <span>Google Maps Platform</span>
+          <span>
+            {panoramaPreference === 'panoramax' ||
+            (panoramaPreference === 'auto' && !activeMapsReady && !activeMapillaryReady)
+              ? 'Panoramax · OpenStreetMap'
+              : panoramaPreference === 'mapillary' ||
+                  (panoramaPreference === 'auto' && !activeMapsReady && activeMapillaryReady)
+                ? 'Mapillary · OpenStreetMap'
+                : 'Google Maps Platform'}
+          </span>
         </footer>
       </main>
     </div>

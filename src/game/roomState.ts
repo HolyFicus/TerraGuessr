@@ -5,6 +5,7 @@ import {
   PLAYER_COLORS,
 } from './geoMath';
 import { getRegionById } from './regions';
+import { sanitizePanoramaUrl } from './sanitize';
 import type {
   DuelRoundDamage,
   LatLng,
@@ -12,6 +13,7 @@ import type {
   MultiplayerPlayer,
   MultiplayerRoomPublicState,
   OnlineFormat,
+  PanoramaProvider,
   PlayerGuess,
   RoundLocation,
   RoundOutcome,
@@ -128,6 +130,12 @@ const VALID_STATUSES = new Set([
 ]);
 const VALID_MOVEMENT_MODES = new Set<MovementMode>(['moving', 'no_move', 'nmpz']);
 const VALID_ONLINE_FORMATS = new Set<OnlineFormat>(['duel', 'classic']);
+const VALID_PROVIDERS = new Set<PanoramaProvider>([
+  'google',
+  'panoramax',
+  'mapillary',
+  'offline',
+]);
 
 function secureRandomIndex(max: number, rng?: () => number): number {
   if (rng) {
@@ -179,10 +187,15 @@ export function inviteCodeToPeerId(code: string): string {
  * stale query parameters or hash fragments.
  */
 export function buildInviteLink(currentHref: string, roomCode: string): string {
-  const url = new URL(currentHref);
-  url.hash = '';
-  url.search = `?join=${encodeURIComponent(normalizeInviteCode(roomCode))}`;
-  return url.toString();
+  const safeCode = encodeURIComponent(normalizeInviteCode(roomCode));
+  try {
+    const url = new URL(currentHref);
+    url.hash = '';
+    url.search = `?join=${safeCode}`;
+    return url.toString();
+  } catch {
+    return `?join=${safeCode}`;
+  }
 }
 
 export function sanitizePlayerName(raw: unknown, fallback: string): string {
@@ -222,12 +235,34 @@ function sanitizeRoundLocation(raw: unknown): RoundLocation | null {
   const loc = raw as Record<string, unknown>;
   const coords = sanitizeLatLng({ lat: loc.lat, lng: loc.lng });
   if (!coords) return null;
+  const provider: PanoramaProvider | undefined =
+    typeof loc.provider === 'string' &&
+    VALID_PROVIDERS.has(loc.provider as PanoramaProvider)
+      ? (loc.provider as PanoramaProvider)
+      : undefined;
+
   return {
     lat: coords.lat,
     lng: coords.lng,
     panoId:
       typeof loc.panoId === 'string' && loc.panoId.length <= 128
         ? loc.panoId
+        : undefined,
+    provider,
+    imageUrl: sanitizePanoramaUrl(loc.imageUrl),
+    isEquirectangular:
+      typeof loc.isEquirectangular === 'boolean'
+        ? loc.isEquirectangular
+        : undefined,
+    cameraAzimuth:
+      typeof loc.cameraAzimuth === 'number' && Number.isFinite(loc.cameraAzimuth)
+        ? ((loc.cameraAzimuth % 360) + 360) % 360
+        : undefined,
+    nextStepUrl: sanitizePanoramaUrl(loc.nextStepUrl),
+    prevStepUrl: sanitizePanoramaUrl(loc.prevStepUrl),
+    attribution:
+      typeof loc.attribution === 'string'
+        ? loc.attribution.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 80)
         : undefined,
     heading:
       typeof loc.heading === 'number' && Number.isFinite(loc.heading)
@@ -548,9 +583,13 @@ export function joinRoom(
   return { ok: true, player };
 }
 
-export function disconnectPlayer(room: InternalRoom, playerId: string): void {
+export function disconnectPlayer(
+  room: InternalRoom,
+  playerId: string,
+  distanceFn: (a: LatLng, b: LatLng) => number = calculateDistanceKm,
+): { roundCompleted: boolean } {
   const player = room.players.find((p) => p.id === playerId);
-  if (!player) return;
+  if (!player) return { roundCompleted: false };
   player.connected = false;
 
   if (player.isHost) {
@@ -561,6 +600,23 @@ export function disconnectPlayer(room: InternalRoom, playerId: string): void {
       room.hostId = nextHost.id;
     }
   }
+
+  // Prevent soft-lock if the disconnected player was the last remaining unguessed player
+  if (room.status === 'playing' && room.currentLocation) {
+    const activePlayers = room.players.filter(
+      (p) => p.connected || p.hasGuessedCurrentRound,
+    );
+    if (
+      activePlayers.length > 0 &&
+      activePlayers.every((p) => p.hasGuessedCurrentRound)
+    ) {
+      room.duelCountdownEndsAt = null;
+      finalizeCurrentRound(room, distanceFn);
+      return { roundCompleted: true };
+    }
+  }
+
+  return { roundCompleted: false };
 }
 
 export function startLocatingRound(
@@ -807,10 +863,11 @@ export function toPublicRoomState(room: InternalRoom): MultiplayerRoomPublicStat
   let publicLocation: RoundLocation | null = room.currentLocation;
 
   if (room.status === 'playing' && room.currentLocation) {
-    // Anti-cheat: hide hintLabel, countryCode, and (when panoId is present for live Street View)
-    // mask lat/lng so guests cannot read the exact answer from WebRTC network packets.
+    // Anti-cheat: hide hintLabel, countryCode, and (when panoId or direct panorama imageUrl
+    // is present) mask lat/lng so guests cannot read the exact answer from WebRTC packets.
     const canHideCoords = Boolean(
-      room.currentLocation.isLiveStreetView && room.currentLocation.panoId,
+      (room.currentLocation.isLiveStreetView && room.currentLocation.panoId) ||
+        room.currentLocation.imageUrl,
     );
     publicLocation = {
       ...room.currentLocation,

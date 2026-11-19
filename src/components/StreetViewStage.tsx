@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Compass, KeyRound, Loader2, Lock, RotateCcw } from 'lucide-react';
 import type { MovementMode, RoundLocation } from '../game/types';
+import { OpenPanoramaViewer } from './OpenPanoramaViewer';
 
 export type MapsErrorCode =
   | 'quota'
@@ -41,36 +42,48 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
   const onHeadingRef = useRef(onHeadingChange);
   onHeadingRef.current = onHeadingChange;
 
-  const [fallbackMode, setFallbackMode] = useState(false);
+  const [googleFailed, setGoogleFailed] = useState(false);
+  const [openViewerFailed, setOpenViewerFailed] = useState(false);
   const [nmpzLocked, setNmpzLocked] = useState(false);
   const [fallbackHeading, setFallbackHeading] = useState(location.heading);
   const [isDraggingFallback, setIsDraggingFallback] = useState(false);
   const dragStartRef = useRef<{ x: number; heading: number } | null>(null);
 
-  // Do not gate on location.isLiveStreetView so live panoramas still appear if
-  // streetViewLib finishes loading right after the user clicks Play.
-  const isWaitingForLibrary =
-    hasMapsKey && !quotaExceeded && !mapsError && !streetViewLib;
-  const shouldUseLiveStreetView =
-    hasMapsKey && !quotaExceeded && !mapsError && Boolean(streetViewLib);
+  const isOpenPanorama =
+    (location.provider === 'panoramax' || location.provider === 'mapillary') &&
+    Boolean(location.imageUrl) &&
+    !openViewerFailed;
+
+  const wantsGoogle =
+    !isOpenPanorama &&
+    location.provider !== 'offline' &&
+    hasMapsKey &&
+    !quotaExceeded &&
+    !mapsError;
+
+  const isWaitingForLibrary = wantsGoogle && !streetViewLib;
+  const shouldUseLiveGoogle = wantsGoogle && Boolean(streetViewLib);
+  const showOfflineFallback =
+    !isOpenPanorama && (!shouldUseLiveGoogle || googleFailed);
 
   const isMovingAllowed = movementMode === 'moving';
   const isNmpz = movementMode === 'nmpz';
 
   useEffect(() => {
+    setOpenViewerFailed(false);
     setFallbackHeading(location.heading);
     onHeadingRef.current(location.heading);
   }, [location, resetSignal]);
 
-  // Initialize StreetViewPanorama ONCE and reuse it across rounds via setPano() / setPosition()
+  // Initialize Google StreetViewPanorama ONCE and reuse it across rounds via setPano() / setPosition()
   useEffect(() => {
-    if (!shouldUseLiveStreetView || !streetViewLib || !containerRef.current) {
-      setFallbackMode(true);
+    if (!shouldUseLiveGoogle || !streetViewLib || !containerRef.current) {
+      setGoogleFailed(true);
       setNmpzLocked(isNmpz);
       return;
     }
 
-    setFallbackMode(false);
+    setGoogleFailed(false);
     setNmpzLocked(isNmpz);
     const container = containerRef.current;
 
@@ -106,7 +119,7 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
       pano.addListener('status_changed', () => {
         const status = pano.getStatus();
         if (status && status !== google.maps.StreetViewStatus.OK) {
-          setFallbackMode(true);
+          setGoogleFailed(true);
         }
       });
 
@@ -124,7 +137,7 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
       enableCloseButton: false,
     });
 
-    if (location.panoId) {
+    if (location.panoId && (!location.provider || location.provider === 'google')) {
       pano.setPano(location.panoId);
     } else {
       pano.setPosition({ lat: location.lat, lng: location.lng });
@@ -137,13 +150,13 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
     isMovingAllowed,
     isNmpz,
     resetSignal,
-    shouldUseLiveStreetView,
+    shouldUseLiveGoogle,
     streetViewLib,
   ]);
 
-  // Trigger resize when the persistent StreetViewStage becomes visible again (e.g. next round / handoff)
+  // Trigger resize when the persistent Google StreetViewStage becomes visible again
   useEffect(() => {
-    if (!visible || !panoramaRef.current) return;
+    if (!visible || !panoramaRef.current || !shouldUseLiveGoogle) return;
     const pano = panoramaRef.current;
     const rafId = window.requestAnimationFrame(() => {
       if (typeof google !== 'undefined' && google.maps?.event) {
@@ -151,7 +164,7 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
       }
     });
     return () => window.cancelAnimationFrame(rafId);
-  }, [visible, location]);
+  }, [visible, location, shouldUseLiveGoogle]);
 
   useEffect(() => {
     return () => {
@@ -204,19 +217,38 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
       className="relative h-full w-full overflow-hidden bg-[#0B1220]"
       data-testid="streetview-stage"
       data-movement-mode={movementMode}
+      data-provider={
+        isOpenPanorama
+          ? location.provider
+          : !showOfflineFallback
+            ? 'google'
+            : 'offline'
+      }
     >
       {/* Persistent Single-Instance Google Street View Container */}
       <div
         ref={containerRef}
         data-testid="streetview-pano-container"
-        className={`h-full w-full ${fallbackMode ? 'hidden' : 'block'} ${
+        className={`h-full w-full ${isOpenPanorama || showOfflineFallback ? 'hidden' : 'block'} ${
           isNmpz && nmpzLocked ? 'pointer-events-none select-none' : ''
         }`}
         style={{ minWidth: '200px', minHeight: '200px' }}
       />
 
-      {/* Subtle NMPZ lock indicator at bottom-left */}
-      {visible && isNmpz && nmpzLocked && !fallbackMode && (
+      {/* Open-Source Hybrid 360° Panorama Viewer (Panoramax keyless / Mapillary free token) */}
+      {isOpenPanorama && (
+        <OpenPanoramaViewer
+          visible={visible}
+          location={location}
+          movementMode={movementMode}
+          resetSignal={resetSignal}
+          onHeadingChange={onHeadingChange}
+          onLoadFailed={() => setOpenViewerFailed(true)}
+        />
+      )}
+
+      {/* Subtle NMPZ lock indicator for Google Street View */}
+      {visible && isNmpz && nmpzLocked && !isOpenPanorama && !showOfflineFallback && (
         <div
           className="pointer-events-none absolute bottom-9 left-3 z-20 flex items-center gap-1.5 rounded-lg border border-slate-700/80 px-2.5 py-1 font-mono text-[11px] font-semibold text-amber-300 shadow"
           style={{ backgroundColor: 'rgba(11, 18, 32, 0.86)' }}
@@ -227,7 +259,7 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
       )}
 
       {/* Graceful Interactive Offline Panoramic Explorer Fallback */}
-      {fallbackMode && (
+      {showOfflineFallback && (
         <div
           className={`relative flex h-full w-full flex-col items-center justify-center overflow-hidden select-none ${
             isNmpz ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'
@@ -310,40 +342,46 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
 
             {!isWaitingForLibrary && (
               <div className="mt-3.5 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-300">
-                {!hasMapsKey && (
+                {openViewerFailed && (
                   <span>
-                    Для живых 360°-панорам Google Street View укажите ваш Google Maps API-ключ.
+                    Не удалось загрузить изображение панорамы — проверьте подключение к интернету или выберите другой источник.
                   </span>
                 )}
-                {hasMapsKey && mapsError === 'referer' && (
+                {!openViewerFailed && !hasMapsKey && (
                   <span>
-                    Домен <code className="text-amber-300">{window.location.origin}</code> не разрешён в настройках HTTP Referrer вашего ключа Google Cloud.
+                    Панорамы в этой точке временно недоступны — вы можете выбрать другой регион или подключить Mapillary / Google Maps.
                   </span>
                 )}
-                {hasMapsKey && mapsError === 'billing' && (
+                {!openViewerFailed && hasMapsKey && mapsError === 'referer' && (
                   <span>
-                    В Google Cloud не включён Maps JavaScript API или не привязан биллинг-аккаунт (бесплатная квота требует активации биллинга).
+                    Домен <code className="text-amber-300">{window.location.origin}</code> не разрешён в HTTP Referrer вашего ключа Google Cloud.
                   </span>
                 )}
-                {hasMapsKey && mapsError === 'invalid_key' && (
+                {!openViewerFailed && hasMapsKey && mapsError === 'billing' && (
                   <span>
-                    Указанный Google Maps API-ключ недействителен — проверьте ключ без лишних пробелов.
+                    В Google Cloud не включён Maps JavaScript API или биллинг — переключите источник на Panoramax (без ключа).
                   </span>
                 )}
-                {hasMapsKey && (mapsError === 'quota' || (quotaExceeded && !mapsError)) && (
+                {!openViewerFailed && hasMapsKey && mapsError === 'invalid_key' && (
                   <span>
-                    Квота Google Maps исчерпана — включён бесплатный автономный режим.
+                    Google Maps API-ключ недействителен — проверьте ключ или переключите источник на Panoramax.
                   </span>
                 )}
-                {hasMapsKey && mapsError === 'auth_failure' && (
+                {!openViewerFailed &&
+                  hasMapsKey &&
+                  (mapsError === 'quota' || (quotaExceeded && !mapsError)) && (
+                    <span>
+                      Квота Google Maps исчерпана — в гибридном режиме следующий раунд автоматически откроется через Panoramax.
+                    </span>
+                  )}
+                {!openViewerFailed && hasMapsKey && mapsError === 'auth_failure' && (
                   <span>
-                    Google Maps отклонил ключ (проверьте HTTP Referrer для{' '}
-                    <code className="text-amber-300">{window.location.origin}/*</code> и биллинг в Google Cloud).
+                    Google Maps отклонил ключ — переключите источник на бесплатный Panoramax или проверьте настройки ключа.
                   </span>
                 )}
-                {hasMapsKey && !mapsError && !quotaExceeded && (
+                {!openViewerFailed && hasMapsKey && !mapsError && !quotaExceeded && (
                   <span>
-                    В выбранной точке нет панорамы Street View — используйте компас и карту Leaflet.
+                    В этой точке нет панорамы Street View — ориентируйтесь по компасу и карте Leaflet.
                   </span>
                 )}
               </div>
@@ -369,24 +407,19 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
                   </button>
                 </>
               )}
-              {onOpenApiKeySetup &&
-                (!hasMapsKey ||
-                  mapsError === 'invalid_key' ||
-                  mapsError === 'referer' ||
-                  mapsError === 'billing' ||
-                  mapsError === 'auth_failure') && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <button
-                      type="button"
-                      onClick={onOpenApiKeySetup}
-                      className="inline-flex cursor-pointer items-center gap-1.5 font-semibold text-amber-400 underline-offset-4 hover:text-amber-300 hover:underline"
-                    >
-                      <KeyRound className="h-3.5 w-3.5" />
-                      Настроить API-ключ
-                    </button>
-                  </>
-                )}
+              {onOpenApiKeySetup && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    onClick={onOpenApiKeySetup}
+                    className="inline-flex cursor-pointer items-center gap-1.5 font-semibold text-amber-400 underline-offset-4 hover:text-amber-300 hover:underline"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    Источники панорам
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

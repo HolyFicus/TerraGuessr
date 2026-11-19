@@ -16,6 +16,7 @@ import {
   getDuelMultiplier,
   resolveDuelRoundDamage,
 } from './game/roomState';
+import { sanitizeApiToken } from './game/sanitize';
 import { soundEngine } from './game/sound';
 import {
   clearMatchHistory,
@@ -30,6 +31,7 @@ import type {
   MapLayerType,
   MatchRecord,
   MovementMode,
+  PanoramaPreference,
   PlayerGuess,
   RoundLocation,
   RoundOutcome,
@@ -49,17 +51,36 @@ import { StreetViewStage, type MapsErrorCode } from './components/StreetViewStag
 import { TitleScreen } from './components/TitleScreen';
 
 const CUSTOM_API_KEY_STORAGE = 'terraspotter_gmaps_api_key';
+const MAPILLARY_TOKEN_STORAGE = 'terraspotter_mapillary_token';
+const PANORAMA_PREF_STORAGE = 'terraspotter_panorama_pref';
 
-function loadSavedApiKey(): { key: string; sessionOnly: boolean } {
+function loadSavedToken(storageKey: string): { key: string; sessionOnly: boolean } {
   try {
-    const sessionKey = window.sessionStorage.getItem(CUSTOM_API_KEY_STORAGE);
-    if (sessionKey) return { key: sessionKey, sessionOnly: true };
-    const localKey = window.localStorage.getItem(CUSTOM_API_KEY_STORAGE);
-    if (localKey) return { key: localKey, sessionOnly: false };
+    const sessionKey = window.sessionStorage.getItem(storageKey);
+    if (sessionKey) return { key: sanitizeApiToken(sessionKey), sessionOnly: true };
+    const localKey = window.localStorage.getItem(storageKey);
+    if (localKey) return { key: sanitizeApiToken(localKey), sessionOnly: false };
     return { key: '', sessionOnly: false };
   } catch {
     return { key: '', sessionOnly: false };
   }
+}
+
+function loadPanoramaPreference(): PanoramaPreference {
+  try {
+    const raw = window.localStorage.getItem(PANORAMA_PREF_STORAGE);
+    if (
+      raw === 'auto' ||
+      raw === 'google' ||
+      raw === 'panoramax' ||
+      raw === 'mapillary'
+    ) {
+      return raw;
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return 'auto';
 }
 
 function buildMatchRecordsFromOutcomes(params: {
@@ -174,10 +195,16 @@ interface TerraSpotterCoreProps {
   hasEnvMapsKey: boolean;
   savedCustomApiKey: string;
   apiKeySessionOnly: boolean;
+  hasEnvMapillaryToken: boolean;
+  savedMapillaryToken: string;
+  effectiveMapillaryToken: string;
+  panoramaPreference: PanoramaPreference;
   quotaExceeded: boolean;
   mapsError: MapsErrorCode;
   streetViewLib: google.maps.StreetViewLibrary | null;
   onSaveCustomApiKey: (key: string, sessionOnly: boolean) => void;
+  onSaveMapillaryToken: (token: string, sessionOnly: boolean) => void;
+  onChangePanoramaPreference: (pref: PanoramaPreference) => void;
 }
 
 const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
@@ -185,10 +212,16 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
   hasEnvMapsKey,
   savedCustomApiKey,
   apiKeySessionOnly,
+  hasEnvMapillaryToken,
+  savedMapillaryToken,
+  effectiveMapillaryToken,
+  panoramaPreference,
   quotaExceeded,
   mapsError,
   streetViewLib,
   onSaveCustomApiKey,
+  onSaveMapillaryToken,
+  onChangePanoramaPreference,
 }) => {
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const initialJoinCode = urlParams.get('join') || '';
@@ -259,8 +292,12 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
   const autostartDoneRef = useRef(false);
   const savedMultiplayerMatchRef = useRef<string | null>(null);
 
-  // Pure JS Haversine distance (zero paid geometry API)
-  const { generateLocation } = useStreetViewGenerator(streetViewLib);
+  // Hybrid Panorama Locator (Google Street View -> Mapillary 360 -> keyless Panoramax 360)
+  const { generateLocation } = useStreetViewGenerator(streetViewLib, {
+    preference: panoramaPreference,
+    mapillaryToken: effectiveMapillaryToken,
+    mapsBlocked: quotaExceeded || Boolean(mapsError),
+  });
   const mp = useMultiplayerRoom(calculateDistanceKm);
 
   const isOnlineSession = Boolean(mp.room);
@@ -1056,8 +1093,13 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
         hasEnvMapsKey={hasEnvMapsKey}
         savedCustomApiKey={savedCustomApiKey}
         apiKeySessionOnly={apiKeySessionOnly}
+        hasEnvMapillaryToken={hasEnvMapillaryToken}
+        savedMapillaryToken={savedMapillaryToken}
+        panoramaPreference={panoramaPreference}
         openKeyPanelSignal={openKeyPanelSignal}
         onSaveCustomApiKey={onSaveCustomApiKey}
+        onSaveMapillaryToken={onSaveMapillaryToken}
+        onChangePanoramaPreference={onChangePanoramaPreference}
         onUpdateSettings={(patch) => {
           mp.clearError();
           setSettings((prev) => ({ ...prev, ...patch }));
@@ -1200,16 +1242,28 @@ const LiveStreetViewTerraSpotter: React.FC<{
   hasEnvMapsKey: boolean;
   savedCustomApiKey: string;
   apiKeySessionOnly: boolean;
+  hasEnvMapillaryToken: boolean;
+  savedMapillaryToken: string;
+  effectiveMapillaryToken: string;
+  panoramaPreference: PanoramaPreference;
   quotaExceeded: boolean;
   mapsError: MapsErrorCode;
   onSaveCustomApiKey: (key: string, sessionOnly: boolean) => void;
+  onSaveMapillaryToken: (token: string, sessionOnly: boolean) => void;
+  onChangePanoramaPreference: (pref: PanoramaPreference) => void;
 }> = ({
   hasEnvMapsKey,
   savedCustomApiKey,
   apiKeySessionOnly,
+  hasEnvMapillaryToken,
+  savedMapillaryToken,
+  effectiveMapillaryToken,
+  panoramaPreference,
   quotaExceeded,
   mapsError,
   onSaveCustomApiKey,
+  onSaveMapillaryToken,
+  onChangePanoramaPreference,
 }) => {
   // Load ONLY the streetView library — zero google.maps.Map, zero geometry, zero marker
   const streetViewLib = useMapsLibrary('streetView');
@@ -1219,25 +1273,49 @@ const LiveStreetViewTerraSpotter: React.FC<{
       hasEnvMapsKey={hasEnvMapsKey}
       savedCustomApiKey={savedCustomApiKey}
       apiKeySessionOnly={apiKeySessionOnly}
+      hasEnvMapillaryToken={hasEnvMapillaryToken}
+      savedMapillaryToken={savedMapillaryToken}
+      effectiveMapillaryToken={effectiveMapillaryToken}
+      panoramaPreference={panoramaPreference}
       quotaExceeded={quotaExceeded}
       mapsError={mapsError}
       streetViewLib={streetViewLib}
       onSaveCustomApiKey={onSaveCustomApiKey}
+      onSaveMapillaryToken={onSaveMapillaryToken}
+      onChangePanoramaPreference={onChangePanoramaPreference}
     />
   );
 };
 
 export default function App() {
-  const envKey =
-    (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '';
+  const envKey = sanitizeApiToken(
+    (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '',
+  );
+  const envMapillaryToken = sanitizeApiToken(
+    (import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined) || '',
+  );
+
   const [savedKeyState, setSavedKeyState] = useState<{
     key: string;
     sessionOnly: boolean;
-  }>(() => loadSavedApiKey());
+  }>(() => loadSavedToken(CUSTOM_API_KEY_STORAGE));
+  const [savedMapillaryState, setSavedMapillaryState] = useState<{
+    key: string;
+    sessionOnly: boolean;
+  }>(() => loadSavedToken(MAPILLARY_TOKEN_STORAGE));
+  const [panoramaPreference, setPanoramaPreference] =
+    useState<PanoramaPreference>(() => loadPanoramaPreference());
   const [quotaExceeded, setQuotaExceeded] = useState(false);
   const [mapsError, setMapsError] = useState<MapsErrorCode>(null);
 
   const effectiveApiKey = savedKeyState.key.trim() || envKey;
+  const effectiveMapillaryToken =
+    savedMapillaryState.key.trim() || envMapillaryToken;
+
+  const shouldMountGoogleProvider =
+    Boolean(effectiveApiKey) &&
+    panoramaPreference !== 'panoramax' &&
+    panoramaPreference !== 'mapillary';
 
   useEffect(() => {
     const onQuotaExceeded = () => {
@@ -1246,7 +1324,6 @@ export default function App() {
     const onMapsError = (e: Event) => {
       const code = (e as CustomEvent<MapsErrorCode>).detail ?? 'auth_failure';
       setMapsError((prev) => {
-        // Keep more specific error codes over generic auth_failure
         if (prev && prev !== 'auth_failure' && code === 'auth_failure') return prev;
         return code;
       });
@@ -1260,7 +1337,8 @@ export default function App() {
   }, []);
 
   const handleSaveCustomApiKey = useCallback(
-    (nextKey: string, sessionOnly: boolean) => {
+    (rawNextKey: string, sessionOnly: boolean) => {
+      const nextKey = sanitizeApiToken(rawNextKey);
       const hadGoogleLoaded =
         typeof window !== 'undefined' &&
         Boolean(
@@ -1285,14 +1363,42 @@ export default function App() {
         // Ignore storage errors
       }
 
-      // Google Maps JS API cannot swap API keys once its script tag is already injected;
-      // reload cleanly so the newly entered key takes effect immediately.
-      if (hadGoogleLoaded && nextKey.trim() !== savedKeyState.key.trim()) {
+      if (hadGoogleLoaded && nextKey !== savedKeyState.key) {
         window.location.reload();
       }
     },
     [savedKeyState.key],
   );
+
+  const handleSaveMapillaryToken = useCallback(
+    (rawToken: string, sessionOnly: boolean) => {
+      const nextToken = sanitizeApiToken(rawToken);
+      setSavedMapillaryState({ key: nextToken, sessionOnly });
+      try {
+        window.sessionStorage.removeItem(MAPILLARY_TOKEN_STORAGE);
+        window.localStorage.removeItem(MAPILLARY_TOKEN_STORAGE);
+        if (nextToken) {
+          if (sessionOnly) {
+            window.sessionStorage.setItem(MAPILLARY_TOKEN_STORAGE, nextToken);
+          } else {
+            window.localStorage.setItem(MAPILLARY_TOKEN_STORAGE, nextToken);
+          }
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    },
+    [],
+  );
+
+  const handleChangePanoramaPreference = useCallback((pref: PanoramaPreference) => {
+    setPanoramaPreference(pref);
+    try {
+      window.localStorage.setItem(PANORAMA_PREF_STORAGE, pref);
+    } catch {
+      // Ignore storage errors
+    }
+  }, []);
 
   const quotaBanner = quotaExceeded ? (
     <div className="z-50 shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs text-amber-900 shadow-sm md:text-sm">
@@ -1315,7 +1421,7 @@ export default function App() {
     <div className="flex h-[100dvh] w-full flex-col overflow-hidden bg-[#0B1220]">
       {quotaBanner}
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {effectiveApiKey ? (
+        {shouldMountGoogleProvider ? (
           <APIProvider
             key={effectiveApiKey}
             apiKey={effectiveApiKey}
@@ -1326,21 +1432,33 @@ export default function App() {
               hasEnvMapsKey={Boolean(envKey)}
               savedCustomApiKey={savedKeyState.key}
               apiKeySessionOnly={savedKeyState.sessionOnly}
+              hasEnvMapillaryToken={Boolean(envMapillaryToken)}
+              savedMapillaryToken={savedMapillaryState.key}
+              effectiveMapillaryToken={effectiveMapillaryToken}
+              panoramaPreference={panoramaPreference}
               quotaExceeded={quotaExceeded}
               mapsError={mapsError}
               onSaveCustomApiKey={handleSaveCustomApiKey}
+              onSaveMapillaryToken={handleSaveMapillaryToken}
+              onChangePanoramaPreference={handleChangePanoramaPreference}
             />
           </APIProvider>
         ) : (
           <TerraSpotterCore
-            hasMapsKey={false}
-            hasEnvMapsKey={false}
+            hasMapsKey={Boolean(effectiveApiKey)}
+            hasEnvMapsKey={Boolean(envKey)}
             savedCustomApiKey={savedKeyState.key}
             apiKeySessionOnly={savedKeyState.sessionOnly}
+            hasEnvMapillaryToken={Boolean(envMapillaryToken)}
+            savedMapillaryToken={savedMapillaryState.key}
+            effectiveMapillaryToken={effectiveMapillaryToken}
+            panoramaPreference={panoramaPreference}
             quotaExceeded={quotaExceeded}
             mapsError={mapsError}
             streetViewLib={null}
             onSaveCustomApiKey={handleSaveCustomApiKey}
+            onSaveMapillaryToken={handleSaveMapillaryToken}
+            onChangePanoramaPreference={handleChangePanoramaPreference}
           />
         )}
       </div>

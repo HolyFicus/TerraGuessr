@@ -128,7 +128,6 @@ const VALID_STATUSES = new Set([
   'round_result',
   'gameover',
 ]);
-const VALID_MOVEMENT_MODES = new Set<MovementMode>(['moving', 'no_move', 'nmpz']);
 const VALID_ONLINE_FORMATS = new Set<OnlineFormat>(['duel', 'classic']);
 const VALID_PROVIDERS = new Set<PanoramaProvider>([
   'google',
@@ -305,11 +304,7 @@ export function sanitizePublicRoomState(
       ? (r.onlineFormat as OnlineFormat)
       : 'classic';
 
-  const movementMode: MovementMode =
-    typeof r.movementMode === 'string' &&
-    VALID_MOVEMENT_MODES.has(r.movementMode as MovementMode)
-      ? (r.movementMode as MovementMode)
-      : 'moving';
+  const movementMode: MovementMode = 'moving';
 
   const maxAllowedScore = onlineFormat === 'duel' ? 200_000 : 100_000;
   const players: MultiplayerPlayer[] = [];
@@ -506,7 +501,7 @@ export function createRoom(params: {
         ? DUEL_MAX_ROUNDS
         : Math.max(1, Math.min(10, Math.round(params.totalRounds || 5))),
     timerSeconds: Math.max(0, Math.min(300, Math.round(params.timerSeconds || 0))),
-    movementMode: params.movementMode,
+    movementMode: 'moving',
     currentRoundIndex: 0,
     roundStartedAt: null,
     duelCountdownEndsAt: null,

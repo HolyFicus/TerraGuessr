@@ -19,7 +19,6 @@ import { normalizeInviteCode } from '../game/roomState';
 import type {
   GameMode,
   GameSettings,
-  MovementMode,
   OnlineFormat,
   PanoramaPreference,
   RegionMedalRecord,
@@ -297,18 +296,12 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     { id: 'multiplayer', label: 'По коду', icon: <Radio className="h-4 w-4 shrink-0" /> },
   ];
 
-  const movementModes: Array<{ id: MovementMode; label: string }> = [
-    { id: 'moving', label: 'Moving' },
-    { id: 'no_move', label: 'No Move' },
-    { id: 'nmpz', label: 'NMPZ' },
-  ];
-
   const timerOptions = [
-    { value: 0, label: '∞' },
-    { value: 30, label: '30с' },
-    { value: 60, label: '60с' },
-    { value: 120, label: '2м' },
-    { value: 180, label: '3м' },
+    { value: 0, label: 'Без таймера' },
+    { value: 30, label: '30 сек' },
+    { value: 60, label: '60 сек' },
+    { value: 120, label: '2 мин' },
+    { value: 180, label: '3 мин' },
   ];
 
   const activeMapsReady = hasEnvMapsKey || Boolean(savedCustomApiKey);
@@ -730,36 +723,16 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 </div>
               )}
 
-              {/* Movement Mode + Rounds (1-10) + Timer in one ultra-clean row */}
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <div
-                  role="group"
-                  aria-label="Режим панорамы"
-                  className="grid min-w-0 flex-1 grid-cols-3 gap-1 rounded-lg bg-[#0B1220] p-1"
-                >
-                  {movementModes.map((m) => {
-                    const active = settings.movementMode === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => onUpdateSettings({ movementMode: m.id })}
-                        className={`h-9 rounded-md px-1 font-mono text-[11px] font-semibold whitespace-nowrap transition-colors sm:text-xs landscape-phone:h-8 ${
-                          active
-                            ? 'bg-amber-500/20 text-amber-300'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        {m.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
+              {/* Rounds (1-10) + Timer in one balanced row */}
+              <div
+                className={`grid gap-2 ${
+                  isDuelSelected ? 'grid-cols-1' : 'grid-cols-2'
+                }`}
+              >
                 {!isDuelSelected && (
-                  <div className="relative flex shrink-0 items-center">
+                  <div className="relative flex items-center">
                     <Layers
-                      className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-slate-400"
+                      className="pointer-events-none absolute left-3 h-3.5 w-3.5 text-slate-400"
                       aria-hidden="true"
                     />
                     <select
@@ -768,20 +741,25 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                       onChange={(e) =>
                         onUpdateSettings({ totalRounds: Number(e.target.value) })
                       }
-                      className="h-11 rounded-lg border border-slate-800 bg-[#0B1220] pr-2 pl-6.5 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-10"
+                      className="h-11 w-full rounded-lg border border-slate-800 bg-[#0B1220] pr-3 pl-8 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-9"
                     >
                       {ROUND_OPTIONS.map((count) => (
                         <option key={count} value={count}>
-                          {count} р.
+                          {count}{' '}
+                          {count === 1
+                            ? 'раунд'
+                            : count >= 2 && count <= 4
+                              ? 'раунда'
+                              : 'раундов'}
                         </option>
                       ))}
                     </select>
                   </div>
                 )}
 
-                <div className="relative flex shrink-0 items-center">
+                <div className="relative flex items-center">
                   <Clock
-                    className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-slate-400"
+                    className="pointer-events-none absolute left-3 h-3.5 w-3.5 text-slate-400"
                     aria-hidden="true"
                   />
                   <select
@@ -790,7 +768,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                     onChange={(e) =>
                       onUpdateSettings({ timerSeconds: Number(e.target.value) })
                     }
-                    className="h-11 rounded-lg border border-slate-800 bg-[#0B1220] pr-2 pl-6.5 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-10"
+                    className="h-11 w-full rounded-lg border border-slate-800 bg-[#0B1220] pr-3 pl-8 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-9"
                   >
                     {timerOptions.map((opt) => (
                       <option key={opt.value} value={opt.value}>

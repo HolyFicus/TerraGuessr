@@ -841,8 +841,7 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     isOnlineSession && mp.room ? mp.room.currentRoundIndex : currentRoundIndex;
   const activeTotalRounds =
     isOnlineSession && mp.room ? mp.room.totalRounds : settings.totalRounds;
-  const activeMovementMode: MovementMode =
-    isOnlineSession && mp.room ? mp.room.movementMode : settings.movementMode;
+  const activeMovementMode: MovementMode = 'moving';
 
   // Keep persistentLocation updated so StreetViewPanorama is created ONCE and reused across rounds
   useEffect(() => {

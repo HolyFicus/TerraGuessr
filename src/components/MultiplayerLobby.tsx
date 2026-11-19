@@ -3,7 +3,7 @@ import { Check, Copy, Heart, Link2, LogOut, Play, Swords, Users } from 'lucide-r
 import { formatScore } from '../game/geoMath';
 import { getRegionById } from '../game/regions';
 import { buildInviteLink, DUEL_STARTING_HP } from '../game/roomState';
-import type { MovementMode, MultiplayerRoomPublicState } from '../game/types';
+import type { MultiplayerRoomPublicState } from '../game/types';
 
 async function copyTextSafely(text: string): Promise<boolean> {
   try {
@@ -39,11 +39,6 @@ interface MultiplayerLobbyProps {
   onLeaveRoom: () => void;
 }
 
-function movementLabel(mode: MovementMode): string {
-  if (mode === 'no_move') return 'No Move';
-  if (mode === 'nmpz') return 'NMPZ';
-  return 'Moving';
-}
 
 export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   room,
@@ -92,8 +87,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
               {region.name} ·{' '}
               {isDuel
                 ? `${formatScore(DUEL_STARTING_HP)} HP · 15с после первого ответа`
-                : `${room.totalRounds} р.`}{' '}
-              · {movementLabel(room.movementMode)}
+                : `${room.totalRounds} р.`}
               {room.timerSeconds > 0 ? ` · ${room.timerSeconds}с` : ''}
             </p>
           </div>

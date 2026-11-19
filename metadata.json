@@ -1,0 +1,8 @@
+{
+  "name": "TerraSpotter",
+  "description": "Географическая игра в стиле GeoGuessr с Google Street View, спутниковой картой, выбором стран и регионов, личной статистикой, режимом для двух игроков на одном устройстве и совместными сессиями в реальном времени по коду приглашения.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

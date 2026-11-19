@@ -1,0 +1,105 @@
+@import "tailwindcss";
+@custom-variant landscape-phone (@media (orientation: landscape) and (max-height: 520px));
+
+@theme {
+  --font-display: "Outfit", system-ui, sans-serif;
+  --font-sans: "Manrope", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100dvh;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-sans);
+    background-color: #0b1220;
+    color: #f8fafc;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button,
+  select,
+  input {
+    touch-action: manipulation;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+}
+
+.safe-area-inset {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-text-shadow {
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
+
+/* Custom slim dark scrollbars for region pickers & stats tables */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.4);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.28);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.55);
+}
+
+/* Hide Google Street View address / watermark clutter only where permitted; keep Google logo & copyright intact for ToS compliance */
+.gm-iv-address {
+  display: none !important;
+}
+
+/* Leaflet dark theme & crisp inline SVG pins */
+.leaflet-container {
+  background-color: #0d1a2d;
+  font-family: var(--font-sans);
+  outline: none;
+}
+
+.terraspotter-leaflet-pin {
+  background: transparent;
+  border: none;
+}
+
+.leaflet-control-attribution {
+  background: rgba(11, 18, 32, 0.78) !important;
+  color: #94a3b8 !important;
+  font-size: 10px !important;
+  padding: 1px 6px !important;
+  border-top-left-radius: 6px;
+}
+
+.leaflet-control-attribution a {
+  color: #cbd5e1 !important;
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: #111a2e !important;
+  color: #f8fafc !important;
+  border: 1px solid rgba(51, 65, 85, 0.85);
+}

@@ -4,10 +4,15 @@ import {
   buildInviteLink,
   createRoom,
   disconnectPlayer,
+  DUEL_LOCKOUT_SECONDS,
+  DUEL_STARTING_HP,
+  expirePendingDuelGuesses,
   generateInviteCode,
+  getDuelMultiplier,
   inviteCodeToPeerId,
   joinRoom,
   normalizeInviteCode,
+  resolveDuelRoundDamage,
   sanitizeLatLng,
   sanitizePublicRoomState,
   setRoundLocation,
@@ -16,7 +21,11 @@ import {
   toPublicRoomState,
 } from './roomState';
 import { escapeHtml, sanitizeHexColor } from './sanitize';
-import { computeStatsSummary, sanitizeMatchRecord } from './statsStorage';
+import {
+  computeStatsSummary,
+  getRegionBestMap,
+  sanitizeMatchRecord,
+} from './statsStorage';
 
 test('invite code generation (6-char), normalization, and WebRTC Peer ID mapping work reliably', () => {
   const existing = new Set<string>(['GEO-AAAAAA']);
@@ -39,17 +48,18 @@ test('invite code generation (6-char), normalization, and WebRTC Peer ID mapping
   );
 });
 
-test('multiplayer room flow: create, idempotent join, anti-cheat coord hiding, simultaneous guess, score', () => {
+test('multiplayer room flow: configurable up to 10 rounds, anti-cheat coord hiding, adaptive mapSize scoring', () => {
   const room = createRoom({
     code: 'GEO-TEST99',
     hostId: 'p1',
     hostName: 'Анна',
     regionId: 'europe',
-    totalRounds: 5,
+    totalRounds: 10,
     timerSeconds: 90,
     movementMode: 'no_move',
   });
 
+  assert.equal(room.totalRounds, 10);
   assert.equal(room.players.length, 1);
   assert.equal(room.players[0].isHost, true);
 
@@ -95,7 +105,7 @@ test('multiplayer room flow: create, idempotent join, anti-cheat coord hiding, s
     false,
   );
 
-  // Player 1 guesses within 20 meters of Paris -> exact 5000 points
+  // Player 1 guesses within 12 meters of Paris -> exact 5000 points (5K!)
   const g1 = submitPlayerGuess(room, 'p1', { lat: 48.8567, lng: 2.3522 }, 12);
   assert.equal(g1.ok, true);
   assert.equal(g1.roundCompleted, false);
@@ -105,7 +115,7 @@ test('multiplayer room flow: create, idempotent join, anti-cheat coord hiding, s
   assert.equal(g1Dup.ok, true);
   assert.equal(g1Dup.roundCompleted, false);
 
-  // Player 2 guesses Madrid -> completes round 1
+  // Player 2 guesses Madrid (~1053 km from Paris) -> scored with adaptive Europe mapSize
   const g2 = submitPlayerGuess(room, 'p2', { lat: 40.4168, lng: -3.7038 }, 18);
   assert.equal(g2.ok, true);
   assert.equal(g2.roundCompleted, true);
@@ -118,7 +128,7 @@ test('multiplayer room flow: create, idempotent join, anti-cheat coord hiding, s
   const p1Score = room.players.find((p) => p.id === 'p1')!.totalScore;
   const p2Score = room.players.find((p) => p.id === 'p2')!.totalScore;
   assert.equal(p1Score, 5000);
-  assert.ok(p2Score < p1Score && p2Score > 2500);
+  assert.ok(p2Score > 100 && p2Score < 2000, `Expected Europe-scaled score for Paris-Madrid, got ${p2Score}`);
 
   assert.equal(startLocatingRound(room, 'p1').ok, true);
   assert.equal(room.currentRoundIndex, 1);
@@ -189,10 +199,10 @@ test('security hardening: XSS escaping, strict color validation, and untrusted P
   assert.equal(sanitized.players[0].totalScore, 100000);
 });
 
-test('statsStorage rejects corrupted records and handles prototype-like regionId safely', () => {
+test('statsStorage saves Explorer medals, Duel W/L counts, and handles prototype-like regionId safely', () => {
   assert.equal(sanitizeMatchRecord({ id: '', totalScore: 'oops' }), null);
 
-  const rec = sanitizeMatchRecord({
+  const rec1 = sanitizeMatchRecord({
     id: 'm1',
     timestamp: Date.now(),
     mode: 'solo',
@@ -208,8 +218,220 @@ test('statsStorage rejects corrupted records and handles prototype-like regionId
     movementMode: 'moving',
     timerSeconds: 0,
   });
-  assert.ok(rec);
-  const summary = computeStatsSummary([rec]);
-  assert.equal(summary.gamesPlayed, 1);
-  assert.equal(summary.regionBreakdown[0].regionId, '__proto__');
+  const rec2 = sanitizeMatchRecord({
+    id: 'm2',
+    timestamp: Date.now() + 1000,
+    mode: 'solo',
+    regionId: 'france',
+    regionName: 'Франция',
+    totalRounds: 5,
+    playerName: 'Игрок',
+    totalScore: 23100,
+    maxPossibleScore: 25000,
+    avgDistanceKm: 18,
+    bestRoundScore: 5000,
+    perfectRounds: 2,
+    medal: 'gold',
+    movementMode: 'no_move',
+    timerSeconds: 60,
+  });
+  const recDuelWin = sanitizeMatchRecord({
+    id: 'm3',
+    timestamp: Date.now() + 2000,
+    mode: 'hotseat',
+    isDuel: true,
+    regionId: 'france',
+    regionName: 'Франция',
+    totalRounds: 4,
+    playerName: 'Игрок 1',
+    totalScore: 18000,
+    maxPossibleScore: 20000,
+    avgDistanceKm: 40,
+    bestRoundScore: 5000,
+    perfectRounds: 1,
+    maxDamageDealt: 2450,
+    won: true,
+    movementMode: 'moving',
+    timerSeconds: 0,
+  });
+  const recDuelLoss = sanitizeMatchRecord({
+    id: 'm4',
+    timestamp: Date.now() + 3000,
+    mode: 'multiplayer',
+    isDuel: true,
+    regionId: 'world',
+    regionName: 'Весь мир',
+    totalRounds: 6,
+    playerName: 'Игрок 1',
+    totalScore: 19000,
+    maxPossibleScore: 30000,
+    avgDistanceKm: 320,
+    bestRoundScore: 4700,
+    perfectRounds: 0,
+    maxDamageDealt: 1200,
+    won: false,
+    movementMode: 'moving',
+    timerSeconds: 0,
+  });
+
+  assert.ok(rec1 && rec2 && recDuelWin && recDuelLoss);
+  // Backfills medal when omitted (15000 / 25000 = silver)
+  assert.equal(rec1.medal, 'silver');
+  assert.equal(rec2.medal, 'gold');
+
+  const records = [rec1, rec2, recDuelWin, recDuelLoss];
+  const summary = computeStatsSummary(records);
+  assert.equal(summary.gamesPlayed, 4);
+  assert.equal(summary.duelWins, 1);
+  assert.equal(summary.duelLosses, 1);
+
+  const regionBest = getRegionBestMap(records);
+  assert.equal(regionBest.get('france')?.bestMedal, 'gold');
+  assert.equal(regionBest.get('france')?.bestScore, 23100);
+  assert.equal(regionBest.get('__proto__')?.bestMedal, 'silver');
+});
+
+test('resolveDuelRoundDamage computes shared Hotseat/Online duel damage, ties, multipliers, and knockouts', () => {
+  // Tie => 0 damage, no winner/loser
+  const tie = resolveDuelRoundDamage(
+    [
+      { playerId: 'p1', playerName: 'A', color: '#F59E0B', guess: { lat: 0, lng: 0 }, distanceKm: 10, score: 4000, timeSpentSec: 5 },
+      { playerId: 'p2', playerName: 'B', color: '#38BDF8', guess: { lat: 0, lng: 0 }, distanceKm: 10, score: 4000, timeSpentSec: 7 },
+    ],
+    { p1: 6000, p2: 6000 },
+    0,
+  );
+  assert.equal(tie.duelDamage.damage, 0);
+  assert.equal(tie.duelDamage.winnerPlayerId, null);
+  assert.equal(tie.duelDamage.hpAfter.p1, 6000);
+  assert.equal(tie.duelDamage.hpAfter.p2, 6000);
+  assert.equal(tie.knockoutWinnerId, null);
+
+  // Round 5 (index 4) => multiplier x1.5; diff = 2000 -> damage = 3000 -> knockout from 2500 HP
+  const ko = resolveDuelRoundDamage(
+    [
+      { playerId: 'p1', playerName: 'A', color: '#F59E0B', guess: { lat: 0, lng: 0 }, distanceKm: 1, score: 4500, timeSpentSec: 5 },
+      { playerId: 'p2', playerName: 'B', color: '#38BDF8', guess: { lat: 0, lng: 0 }, distanceKm: 500, score: 2500, timeSpentSec: 7 },
+    ],
+    { p1: 4200, p2: 2500 },
+    4,
+  );
+  assert.equal(ko.duelDamage.multiplier, 1.5);
+  assert.equal(ko.duelDamage.damage, 3000);
+  assert.equal(ko.duelDamage.winnerPlayerId, 'p1');
+  assert.equal(ko.duelDamage.loserPlayerId, 'p2');
+  assert.equal(ko.duelDamage.hpBefore?.p2, 2500);
+  assert.equal(ko.duelDamage.hpAfter.p2, 0);
+  assert.equal(ko.duelDamage.hpAfter.p1, 4200);
+  assert.equal(ko.knockoutWinnerId, 'p1');
+});
+
+test('duel 1v1 mode: 2-player cap, 6000 HP, 15s countdown, escalating multiplier, and knockout victory', () => {
+  assert.equal(getDuelMultiplier(0), 1);
+  assert.equal(getDuelMultiplier(3), 1);
+  assert.equal(getDuelMultiplier(4), 1.5);
+  assert.equal(getDuelMultiplier(5), 2);
+  assert.equal(getDuelMultiplier(6), 2.5);
+
+  const duel = createRoom({
+    code: 'GEO-DUEL01',
+    hostId: 'pl_host1111',
+    hostName: 'Алиса',
+    onlineFormat: 'duel',
+    regionId: 'europe',
+    totalRounds: 5,
+    timerSeconds: 0,
+    movementMode: 'moving',
+  });
+
+  // Cannot start a duel alone
+  assert.equal(startLocatingRound(duel, 'pl_host1111').ok, false);
+
+  // 2nd player joins cleanly with 6000 HP
+  assert.equal(joinRoom(duel, 'pl_guest2222', 'Боб').ok, true);
+  assert.equal(duel.players[0].hp, DUEL_STARTING_HP);
+  assert.equal(duel.players[1].hp, DUEL_STARTING_HP);
+
+  // 3rd player is blocked in 1v1 duel
+  assert.equal(joinRoom(duel, 'pl_third3333', 'Лишний').ok, false);
+
+  // Round 1 starts
+  assert.equal(startLocatingRound(duel, 'pl_host1111').ok, true);
+  assert.equal(
+    setRoundLocation(
+      duel,
+      'pl_host1111',
+      {
+        lat: 48.8566,
+        lng: 2.3522,
+        panoId: 'pano-duel-1',
+        heading: 0,
+        pitch: 0,
+        hintLabel: 'Париж',
+        countryCode: 'FR',
+        isLiveStreetView: true,
+      },
+      1_000_000,
+    ).ok,
+    true,
+  );
+
+  // First duelist locks in -> 15-second pressure countdown begins
+  const g1 = submitPlayerGuess(
+    duel,
+    'pl_host1111',
+    { lat: 48.8566, lng: 2.3522 },
+    10,
+    undefined,
+    1_010_000,
+  );
+  assert.equal(g1.ok, true);
+  assert.equal(g1.roundCompleted, false);
+  assert.equal(duel.duelCountdownEndsAt, 1_010_000 + DUEL_LOCKOUT_SECONDS * 1000);
+
+  // Second duelist times out -> host expires countdown -> 5000 vs 0 => 5000 damage (x1.0)
+  const exp = expirePendingDuelGuesses(duel, 'pl_host1111');
+  assert.equal(exp.ok, true);
+  assert.equal(exp.roundCompleted, true);
+  assert.equal(duel.status, 'round_result');
+  assert.equal(duel.players.find((p) => p.id === 'pl_host1111')?.hp, 6000);
+  assert.equal(duel.players.find((p) => p.id === 'pl_guest2222')?.hp, 1000);
+  assert.equal(duel.roundHistory[0].duelDamage?.damage, 5000);
+  assert.equal(duel.roundHistory[0].duelDamage?.multiplier, 1);
+  assert.equal(duel.roundHistory[0].duelDamage?.hpBefore?.pl_guest2222, 6000);
+  assert.equal(duel.roundHistory[0].duelDamage?.hpAfter.pl_guest2222, 1000);
+  assert.equal(duel.duelWinnerId, null);
+
+  // Round 2 knockout: Alice scores 5000 again, Bob scores 0 => Bob hits 0 HP -> Alice wins duel
+  assert.equal(startLocatingRound(duel, 'pl_host1111').ok, true);
+  assert.equal(
+    setRoundLocation(duel, 'pl_host1111', {
+      lat: 51.5074,
+      lng: -0.1278,
+      panoId: 'pano-duel-2',
+      heading: 0,
+      pitch: 0,
+      hintLabel: 'Лондон',
+      countryCode: 'GB',
+      isLiveStreetView: true,
+    }).ok,
+    true,
+  );
+  submitPlayerGuess(duel, 'pl_host1111', { lat: 51.5074, lng: -0.1278 }, 8);
+  expirePendingDuelGuesses(duel, 'pl_host1111');
+
+  assert.equal(duel.players.find((p) => p.id === 'pl_guest2222')?.hp, 0);
+  assert.equal(duel.duelWinnerId, 'pl_host1111');
+
+  // Next step after knockout transitions directly to gameover
+  assert.equal(startLocatingRound(duel, 'pl_host1111').ok, true);
+  assert.equal(duel.status, 'gameover');
+
+  // Public state sanitizes duel metadata cleanly
+  const pub = sanitizePublicRoomState(toPublicRoomState(duel));
+  assert.ok(pub);
+  assert.equal(pub.onlineFormat, 'duel');
+  assert.equal(pub.duelWinnerId, 'pl_host1111');
+  assert.equal(pub.players[1].hp, 0);
+  assert.equal(pub.roundHistory[0].duelDamage?.hpBefore?.pl_guest2222, 6000);
 });

@@ -3,6 +3,7 @@ import {
   BarChart3,
   Globe2,
   Play,
+  Swords,
   Users,
   Radio,
   ArrowRight,
@@ -10,19 +11,30 @@ import {
   KeyRound,
   Check,
   X,
+  Layers,
 } from 'lucide-react';
+import { formatScore, MAX_ROUND_SCORE, MAX_ROUNDS, MIN_ROUNDS } from '../game/geoMath';
 import { REGIONS, getRegionById } from '../game/regions';
 import { normalizeInviteCode } from '../game/roomState';
-import type { GameMode, GameSettings, MovementMode } from '../game/types';
+import type {
+  GameMode,
+  GameSettings,
+  MovementMode,
+  OnlineFormat,
+  RegionMedalRecord,
+} from '../game/types';
+import { MedalIcon } from './MedalIcon';
 
 interface TitleScreenProps {
   settings: GameSettings;
   totalGamesPlayed: number;
+  regionMedals: Map<string, RegionMedalRecord>;
   joinCodeInitial: string;
   multiplayerError: string | null;
   hasEnvMapsKey: boolean;
   savedCustomApiKey: string;
   apiKeySessionOnly: boolean;
+  openKeyPanelSignal?: number;
   onSaveCustomApiKey: (key: string, sessionOnly: boolean) => void;
   onUpdateSettings: (patch: Partial<GameSettings>) => void;
   onStartLocalGame: () => void;
@@ -30,6 +42,19 @@ interface TitleScreenProps {
   onJoinOnlineRoom: (code: string, playerName: string) => void;
   onOpenStats: () => void;
 }
+
+function pluralRoundsRu(count: number): string {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'раунд';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'раунда';
+  return 'раундов';
+}
+
+const ROUND_OPTIONS = Array.from(
+  { length: MAX_ROUNDS - MIN_ROUNDS + 1 },
+  (_, i) => MIN_ROUNDS + i,
+);
 
 /**
  * Pure abstract minimalist cartographic background:
@@ -136,11 +161,13 @@ const AbstractMinimalBackground: React.FC = () => (
 export const TitleScreen: React.FC<TitleScreenProps> = ({
   settings,
   totalGamesPlayed,
+  regionMedals,
   joinCodeInitial,
   multiplayerError,
   hasEnvMapsKey,
   savedCustomApiKey,
   apiKeySessionOnly,
+  openKeyPanelSignal = 0,
   onSaveCustomApiKey,
   onUpdateSettings,
   onStartLocalGame,
@@ -165,11 +192,21 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     setSessionOnlyInput(apiKeySessionOnly);
   }, [apiKeySessionOnly]);
 
+  useEffect(() => {
+    if (openKeyPanelSignal > 0) {
+      setShowKeyPanel(true);
+    }
+  }, [openKeyPanelSignal]);
+
   const selectedRegion = getRegionById(settings.regionId);
   const filteredRegions = REGIONS.filter((r) => r.category === regionTab);
 
   const player1Name = settings.playerNames[0] ?? 'Игрок 1';
   const player2Name = settings.playerNames[1] ?? 'Игрок 2';
+
+  const isDuelSelected =
+    (settings.mode === 'hotseat' && settings.hotseatFormat === 'duel') ||
+    (settings.mode === 'multiplayer' && settings.onlineFormat === 'duel');
 
   const setPlayerName = (index: number, value: string) => {
     const next = [...settings.playerNames];
@@ -258,6 +295,23 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   ];
 
   const activeMapsReady = hasEnvMapsKey || Boolean(savedCustomApiKey);
+
+  const formatButtons: Array<{
+    id: OnlineFormat;
+    label: string;
+    icon: React.ReactNode;
+  }> = [
+    {
+      id: 'duel',
+      label: 'Дуэль 1×1 · 6000 HP',
+      icon: <Swords className="h-3.5 w-3.5 shrink-0" />,
+    },
+    {
+      id: 'classic',
+      label: `Очки · ${settings.totalRounds} р.`,
+      icon: <Users className="h-3.5 w-3.5 shrink-0" />,
+    },
+  ];
 
   return (
     <div className="safe-area-inset relative flex min-h-[100dvh] w-full flex-col overflow-x-hidden bg-[#0B1220] text-slate-100">
@@ -443,44 +497,98 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               )}
 
               {settings.mode === 'hotseat' && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="relative flex items-center">
-                    <span
-                      className="pointer-events-none absolute left-3 h-2 w-2 rounded-full bg-amber-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="p1-name"
-                      aria-label="Игрок 1"
-                      type="text"
-                      maxLength={24}
-                      value={player1Name}
-                      onChange={(e) => setPlayerName(0, e.target.value)}
-                      placeholder="Игрок 1"
-                      className="h-11 w-full rounded-lg border border-slate-800 bg-[#0B1220] pr-3 pl-7 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none landscape-phone:h-9"
-                    />
+                <div className="flex flex-col gap-2">
+                  {/* Hotseat Duel vs Classic Format Switcher */}
+                  <div
+                    role="group"
+                    aria-label="Формат игры на одном устройстве"
+                    className="grid grid-cols-2 gap-1 rounded-lg bg-[#0B1220] p-1"
+                  >
+                    {formatButtons.map((fmt) => {
+                      const active = settings.hotseatFormat === fmt.id;
+                      return (
+                        <button
+                          key={fmt.id}
+                          type="button"
+                          onClick={() => onUpdateSettings({ hotseatFormat: fmt.id })}
+                          className={`inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 text-xs font-semibold whitespace-nowrap transition-colors landscape-phone:h-8 ${
+                            active
+                              ? 'bg-amber-500/20 text-amber-300'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {fmt.icon}
+                          <span>{fmt.label}</span>
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div className="relative flex items-center">
-                    <span
-                      className="pointer-events-none absolute left-3 h-2 w-2 rounded-full bg-sky-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="p2-name"
-                      aria-label="Игрок 2"
-                      type="text"
-                      maxLength={24}
-                      value={player2Name}
-                      onChange={(e) => setPlayerName(1, e.target.value)}
-                      placeholder="Игрок 2"
-                      className="h-11 w-full rounded-lg border border-slate-800 bg-[#0B1220] pr-3 pl-7 text-sm text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none landscape-phone:h-9"
-                    />
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="relative flex items-center">
+                      <span
+                        className="pointer-events-none absolute left-3 h-2 w-2 rounded-full bg-amber-400"
+                        aria-hidden="true"
+                      />
+                      <input
+                        id="p1-name"
+                        aria-label="Игрок 1"
+                        type="text"
+                        maxLength={24}
+                        value={player1Name}
+                        onChange={(e) => setPlayerName(0, e.target.value)}
+                        placeholder="Игрок 1"
+                        className="h-11 w-full rounded-lg border border-slate-800 bg-[#0B1220] pr-3 pl-7 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none landscape-phone:h-9"
+                      />
+                    </div>
+                    <div className="relative flex items-center">
+                      <span
+                        className="pointer-events-none absolute left-3 h-2 w-2 rounded-full bg-sky-400"
+                        aria-hidden="true"
+                      />
+                      <input
+                        id="p2-name"
+                        aria-label="Игрок 2"
+                        type="text"
+                        maxLength={24}
+                        value={player2Name}
+                        onChange={(e) => setPlayerName(1, e.target.value)}
+                        placeholder="Игрок 2"
+                        className="h-11 w-full rounded-lg border border-slate-800 bg-[#0B1220] pr-3 pl-7 text-sm text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none landscape-phone:h-9"
+                      />
+                    </div>
                   </div>
                 </div>
               )}
 
               {settings.mode === 'multiplayer' && (
                 <div className="flex flex-col gap-2">
+                  {/* Duel vs Classic Online Format Switcher */}
+                  <div
+                    role="group"
+                    aria-label="Формат онлайн-игры"
+                    className="grid grid-cols-2 gap-1 rounded-lg bg-[#0B1220] p-1"
+                  >
+                    {formatButtons.map((fmt) => {
+                      const active = settings.onlineFormat === fmt.id;
+                      return (
+                        <button
+                          key={fmt.id}
+                          type="button"
+                          onClick={() => onUpdateSettings({ onlineFormat: fmt.id })}
+                          className={`inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 text-xs font-semibold whitespace-nowrap transition-colors landscape-phone:h-8 ${
+                            active
+                              ? 'bg-amber-500/20 text-amber-300'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {fmt.icon}
+                          <span>{fmt.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
                   <input
                     id="online-player-name"
                     aria-label="Ваше имя"
@@ -516,12 +624,12 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 </div>
               )}
 
-              {/* Movement Mode + Timer in one ultra-clean row */}
-              <div className="flex items-center gap-2">
+              {/* Movement Mode + Rounds (1-10) + Timer in one ultra-clean row */}
+              <div className="flex items-center gap-1.5 sm:gap-2">
                 <div
                   role="group"
                   aria-label="Режим панорамы"
-                  className="grid flex-1 grid-cols-3 gap-1 rounded-lg bg-[#0B1220] p-1"
+                  className="grid min-w-0 flex-1 grid-cols-3 gap-1 rounded-lg bg-[#0B1220] p-1"
                 >
                   {movementModes.map((m) => {
                     const active = settings.movementMode === m.id;
@@ -530,7 +638,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                         key={m.id}
                         type="button"
                         onClick={() => onUpdateSettings({ movementMode: m.id })}
-                        className={`h-9 rounded-md font-mono text-xs font-semibold whitespace-nowrap transition-colors landscape-phone:h-8 ${
+                        className={`h-9 rounded-md px-1 font-mono text-[11px] font-semibold whitespace-nowrap transition-colors sm:text-xs landscape-phone:h-8 ${
                           active
                             ? 'bg-amber-500/20 text-amber-300'
                             : 'text-slate-400 hover:text-slate-200'
@@ -542,9 +650,32 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   })}
                 </div>
 
+                {!isDuelSelected && (
+                  <div className="relative flex shrink-0 items-center">
+                    <Layers
+                      className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-slate-400"
+                      aria-hidden="true"
+                    />
+                    <select
+                      aria-label="Количество раундов"
+                      value={settings.totalRounds}
+                      onChange={(e) =>
+                        onUpdateSettings({ totalRounds: Number(e.target.value) })
+                      }
+                      className="h-11 rounded-lg border border-slate-800 bg-[#0B1220] pr-2 pl-6.5 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-10"
+                    >
+                      {ROUND_OPTIONS.map((count) => (
+                        <option key={count} value={count}>
+                          {count} р.
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <div className="relative flex shrink-0 items-center">
                   <Clock
-                    className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-slate-400"
+                    className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-slate-400"
                     aria-hidden="true"
                   />
                   <select
@@ -553,7 +684,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                     onChange={(e) =>
                       onUpdateSettings({ timerSeconds: Number(e.target.value) })
                     }
-                    className="h-11 rounded-lg border border-slate-800 bg-[#0B1220] pr-2.5 pl-7 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-10"
+                    className="h-11 rounded-lg border border-slate-800 bg-[#0B1220] pr-2 pl-6.5 font-mono text-xs font-semibold text-slate-200 focus:border-amber-500 focus:outline-none landscape-phone:h-10"
                   >
                     {timerOptions.map((opt) => (
                       <option key={opt.value} value={opt.value}>
@@ -581,16 +712,24 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               onClick={handlePrimaryStart}
               className="flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-amber-500 px-5 font-display text-base font-bold text-slate-950 shadow-lg transition-transform hover:bg-amber-400 active:scale-[0.98] landscape-phone:h-10 landscape-phone:text-sm"
             >
-              <Play className="h-4 w-4 fill-current shrink-0" aria-hidden="true" />
+              {isDuelSelected ? (
+                <Swords className="h-4 w-4 shrink-0" aria-hidden="true" />
+              ) : (
+                <Play className="h-4 w-4 fill-current shrink-0" aria-hidden="true" />
+              )}
               <span className="truncate">
                 {settings.mode === 'multiplayer'
-                  ? `Создать комнату · ${selectedRegion.name}`
-                  : `Играть · ${selectedRegion.name}`}
+                  ? settings.onlineFormat === 'duel'
+                    ? `Создать дуэль · ${selectedRegion.name}`
+                    : `Создать комнату · ${selectedRegion.name}`
+                  : isDuelSelected
+                    ? `Начать дуэль · ${selectedRegion.name}`
+                    : `Играть · ${selectedRegion.name}`}
               </span>
             </button>
           </section>
 
-          {/* Minimal Region & Country Picker */}
+          {/* Minimal Region & Country Picker with Explorer Mode Medals */}
           <section className="flex flex-col gap-3 rounded-xl border border-slate-800/90 bg-[#111A2E]/85 p-3.5 sm:p-4 lg:col-span-7 landscape-phone:col-span-6 landscape-phone:gap-2 landscape-phone:p-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="truncate font-display text-sm font-bold text-white">
@@ -626,18 +765,32 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             <div className="grid max-h-[260px] grid-cols-2 gap-1.5 overflow-y-auto pr-0.5 sm:max-h-[340px] sm:grid-cols-3 sm:gap-2 landscape-phone:max-h-[210px] landscape-phone:grid-cols-2">
               {filteredRegions.map((reg) => {
                 const isSelected = reg.id === settings.regionId;
+                const record = regionMedals.get(reg.id);
                 return (
                   <button
                     key={reg.id}
                     type="button"
                     onClick={() => onUpdateSettings({ regionId: reg.id })}
-                    className={`flex min-h-[44px] items-center justify-between gap-1.5 rounded-lg border px-3 py-2 text-left text-xs font-semibold transition-colors sm:text-sm landscape-phone:min-h-[38px] landscape-phone:px-2.5 ${
+                    className={`flex min-h-[44px] items-center justify-between gap-1.5 rounded-lg border px-2.5 py-2 text-left text-xs font-semibold transition-colors sm:px-3 sm:text-sm landscape-phone:min-h-[38px] landscape-phone:px-2.5 ${
                       isSelected
                         ? 'border-amber-500/80 bg-amber-500/15 text-amber-200'
                         : 'border-slate-800/90 bg-[#0B1220]/80 text-slate-200 hover:border-slate-700 hover:text-white'
                     }`}
                   >
-                    <span className="truncate">{reg.name}</span>
+                    <span className="min-w-0 truncate">{reg.name}</span>
+                    {record && (
+                      <span
+                        className="flex shrink-0 items-center gap-1"
+                        title={`Рекорд: ${formatScore(record.bestScore)}`}
+                      >
+                        {record.bestMedal !== 'none' && (
+                          <MedalIcon tier={record.bestMedal} size="xs" />
+                        )}
+                        <span className="font-mono text-[10px] tabular-nums text-slate-400">
+                          {formatScore(record.bestScore)}
+                        </span>
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -647,7 +800,11 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
         {/* Quiet Single-Line Attribution */}
         <footer className="flex items-center justify-between pt-1 text-[11px] text-slate-500 landscape-phone:hidden">
-          <span>5 раундов · до 25&nbsp;000</span>
+          <span data-testid="footer-format-summary">
+            {isDuelSelected
+              ? 'Дуэль 1×1 · 6 000 HP · множитель с 5-го раунда'
+              : `${settings.totalRounds} ${pluralRoundsRu(settings.totalRounds)} · до ${formatScore(settings.totalRounds * MAX_ROUND_SCORE)}`}
+          </span>
           <span>Google Maps Platform</span>
         </footer>
       </main>

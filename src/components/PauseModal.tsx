@@ -7,6 +7,7 @@ interface PauseModalProps {
   roundNumber: number;
   totalRounds: number;
   score: number;
+  isDuel?: boolean;
   canRestart: boolean;
   onResume: () => void;
   onRestart: () => void;
@@ -14,10 +15,10 @@ interface PauseModalProps {
 }
 
 export const PauseModal: React.FC<PauseModalProps> = ({
-  regionName,
   roundNumber,
   totalRounds,
   score,
+  isDuel = false,
   canRestart,
   onResume,
   onRestart,
@@ -39,8 +40,14 @@ export const PauseModal: React.FC<PauseModalProps> = ({
             Пауза
           </h2>
           <span className="font-mono text-xs tabular-nums text-slate-400">
-            {roundNumber}/{totalRounds} ·{' '}
-            <span className="text-amber-400">{formatScore(score)}</span>
+            {isDuel ? (
+              <span className="text-amber-300">Дуэль · Р{roundNumber}</span>
+            ) : (
+              <>
+                {roundNumber}/{totalRounds} ·{' '}
+                <span className="text-amber-400">{formatScore(score)}</span>
+              </>
+            )}
           </span>
         </div>
 

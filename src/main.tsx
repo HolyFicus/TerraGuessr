@@ -3,9 +3,12 @@ import 'leaflet/dist/leaflet.css';
 import App from './App.tsx';
 import './index.css';
 
-// Mandatory Tier-1 Google Maps Platform Demo Key Quota Defense
+// Mandatory Tier-1 Google Maps Platform Demo Key Quota Defense + error diagnostics
 (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
   window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+  window.dispatchEvent(
+    new CustomEvent('gmp-maps-error', { detail: 'auth_failure' }),
+  );
 };
 
 const origConsoleError = console.error;
@@ -18,6 +21,18 @@ console.error = (...args: unknown[]) => {
     msg.includes('exceeded your request quota')
   ) {
     window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+    window.dispatchEvent(new CustomEvent('gmp-maps-error', { detail: 'quota' }));
+  } else if (msg.includes('RefererNotAllowedMapError')) {
+    window.dispatchEvent(new CustomEvent('gmp-maps-error', { detail: 'referer' }));
+  } else if (
+    msg.includes('BillingNotEnabledMapError') ||
+    msg.includes('ApiNotActivatedMapError')
+  ) {
+    window.dispatchEvent(new CustomEvent('gmp-maps-error', { detail: 'billing' }));
+  } else if (msg.includes('InvalidKeyMapError')) {
+    window.dispatchEvent(
+      new CustomEvent('gmp-maps-error', { detail: 'invalid_key' }),
+    );
   }
 };
 

@@ -5,6 +5,10 @@ export interface LatLng {
 
 export type GameMode = 'solo' | 'hotseat' | 'multiplayer';
 
+export type OnlineFormat = 'duel' | 'classic';
+
+export type MedalTier = 'platinum' | 'gold' | 'silver' | 'bronze' | 'none';
+
 export type MovementMode = 'moving' | 'no_move' | 'nmpz';
 
 export type MapLayerType = 'roadmap' | 'satellite';
@@ -40,6 +44,8 @@ export interface RegionDefinition {
 
 export interface GameSettings {
   mode: GameMode;
+  hotseatFormat: OnlineFormat;
+  onlineFormat: OnlineFormat;
   regionId: string;
   totalRounds: number;
   timerSeconds: number; // 0 = unlimited
@@ -68,16 +74,27 @@ export interface PlayerGuess {
   timeSpentSec: number;
 }
 
+export interface DuelRoundDamage {
+  multiplier: number;
+  damage: number;
+  winnerPlayerId: string | null;
+  loserPlayerId: string | null;
+  hpBefore?: Record<string, number>;
+  hpAfter: Record<string, number>;
+}
+
 export interface RoundOutcome {
   roundIndex: number;
   actual: RoundLocation;
   guesses: PlayerGuess[];
+  duelDamage?: DuelRoundDamage;
 }
 
 export interface MatchRecord {
   id: string;
   timestamp: number;
   mode: GameMode;
+  isDuel?: boolean;
   regionId: string;
   regionName: string;
   totalRounds: number;
@@ -87,9 +104,21 @@ export interface MatchRecord {
   avgDistanceKm: number;
   bestRoundScore: number;
   perfectRounds: number;
+  medal?: MedalTier;
+  maxDamageDealt?: number;
   movementMode: MovementMode;
   timerSeconds: number;
   won?: boolean;
+}
+
+export interface RegionMedalRecord {
+  regionId: string;
+  regionName: string;
+  games: number;
+  bestScore: number;
+  bestMaxPossible: number;
+  avgScore: number;
+  bestMedal: MedalTier;
 }
 
 export interface PlayerStatsSummary {
@@ -101,13 +130,9 @@ export interface PlayerStatsSummary {
   perfectRounds: number;
   totalPoints: number;
   wins: number;
-  regionBreakdown: Array<{
-    regionId: string;
-    regionName: string;
-    games: number;
-    bestScore: number;
-    avgScore: number;
-  }>;
+  duelWins: number;
+  duelLosses: number;
+  regionBreakdown: RegionMedalRecord[];
 }
 
 export interface MultiplayerPlayer {
@@ -117,6 +142,7 @@ export interface MultiplayerPlayer {
   isHost: boolean;
   connected: boolean;
   totalScore: number;
+  hp: number;
   hasGuessedCurrentRound: boolean;
   readyForNext: boolean;
 }
@@ -124,6 +150,7 @@ export interface MultiplayerPlayer {
 export interface MultiplayerRoomPublicState {
   code: string;
   hostId: string;
+  onlineFormat: OnlineFormat;
   status: 'lobby' | 'locating' | 'playing' | 'round_result' | 'gameover';
   regionId: string;
   totalRounds: number;
@@ -131,6 +158,8 @@ export interface MultiplayerRoomPublicState {
   movementMode: MovementMode;
   currentRoundIndex: number;
   roundStartedAt: number | null;
+  duelCountdownEndsAt: number | null;
+  duelWinnerId: string | null;
   currentLocation: RoundLocation | null;
   players: MultiplayerPlayer[];
   roundHistory: RoundOutcome[];

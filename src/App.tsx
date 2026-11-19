@@ -4,13 +4,22 @@ import { Loader2 } from 'lucide-react';
 import {
   calculateDistanceKm,
   calculateGeoScore,
+  getMedalForScore,
+  getRegionMapSizeMeters,
   MAX_ROUND_SCORE,
   PLAYER_COLORS,
 } from './game/geoMath';
 import { getRegionById } from './game/regions';
+import {
+  DUEL_MAX_ROUNDS,
+  DUEL_STARTING_HP,
+  getDuelMultiplier,
+  resolveDuelRoundDamage,
+} from './game/roomState';
 import { soundEngine } from './game/sound';
 import {
   clearMatchHistory,
+  getRegionBestMap,
   loadMatchHistory,
   saveMatchRecords,
 } from './game/statsStorage';
@@ -36,7 +45,7 @@ import { MultiplayerLobby } from './components/MultiplayerLobby';
 import { PauseModal } from './components/PauseModal';
 import { RoundResultView } from './components/RoundResultView';
 import { StatsModal } from './components/StatsModal';
-import { StreetViewStage } from './components/StreetViewStage';
+import { StreetViewStage, type MapsErrorCode } from './components/StreetViewStage';
 import { TitleScreen } from './components/TitleScreen';
 
 const CUSTOM_API_KEY_STORAGE = 'terraspotter_gmaps_api_key';
@@ -56,6 +65,8 @@ function loadSavedApiKey(): { key: string; sessionOnly: boolean } {
 function buildMatchRecordsFromOutcomes(params: {
   outcomes: RoundOutcome[];
   mode: GameSettings['mode'];
+  isDuel?: boolean;
+  duelWinnerId?: string | null;
   regionId: string;
   movementMode: MovementMode;
   timerSeconds: number;
@@ -73,6 +84,7 @@ function buildMatchRecordsFromOutcomes(params: {
       distances: number[];
       bestRoundScore: number;
       perfectRounds: number;
+      maxDamageDealt: number;
     }
   >();
 
@@ -84,11 +96,19 @@ function buildMatchRecordsFromOutcomes(params: {
         distances: [],
         bestRoundScore: 0,
         perfectRounds: 0,
+        maxDamageDealt: 0,
       };
       entry.totalScore += g.score;
       if (g.distanceKm !== null) entry.distances.push(g.distanceKm);
       if (g.score > entry.bestRoundScore) entry.bestRoundScore = g.score;
       if (g.score >= MAX_ROUND_SCORE) entry.perfectRounds += 1;
+      if (
+        o.duelDamage &&
+        o.duelDamage.winnerPlayerId === g.playerId &&
+        o.duelDamage.damage > entry.maxDamageDealt
+      ) {
+        entry.maxDamageDealt = o.duelDamage.damage;
+      }
       perPlayer.set(g.playerId, entry);
     });
   });
@@ -112,10 +132,23 @@ function buildMatchRecordsFromOutcomes(params: {
               10,
           ) / 10
         : 0;
+
+    let won: boolean | undefined;
+    if (params.isDuel) {
+      if (params.duelWinnerId) {
+        won = playerId === params.duelWinnerId;
+      } else {
+        won = entry.totalScore === maxScoreInMatch && maxScoreInMatch > 0;
+      }
+    } else if (isCompetitive) {
+      won = entry.totalScore === maxScoreInMatch && maxScoreInMatch > 0;
+    }
+
     return {
       id: `${now}_${playerId}_${Math.random().toString(36).slice(2, 7)}`,
       timestamp: now,
       mode: params.mode,
+      isDuel: params.isDuel ? true : undefined,
       regionId: region.id,
       regionName: region.name,
       totalRounds: params.outcomes.length,
@@ -125,11 +158,13 @@ function buildMatchRecordsFromOutcomes(params: {
       avgDistanceKm,
       bestRoundScore: entry.bestRoundScore,
       perfectRounds: entry.perfectRounds,
+      medal: params.isDuel
+        ? 'none'
+        : getMedalForScore(entry.totalScore, maxPossibleScore),
+      maxDamageDealt: params.isDuel ? entry.maxDamageDealt : undefined,
       movementMode: params.movementMode,
       timerSeconds: params.timerSeconds,
-      won: isCompetitive
-        ? entry.totalScore === maxScoreInMatch && maxScoreInMatch > 0
-        : undefined,
+      won,
     };
   });
 }
@@ -140,6 +175,7 @@ interface TerraSpotterCoreProps {
   savedCustomApiKey: string;
   apiKeySessionOnly: boolean;
   quotaExceeded: boolean;
+  mapsError: MapsErrorCode;
   streetViewLib: google.maps.StreetViewLibrary | null;
   onSaveCustomApiKey: (key: string, sessionOnly: boolean) => void;
 }
@@ -150,6 +186,7 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
   savedCustomApiKey,
   apiKeySessionOnly,
   quotaExceeded,
+  mapsError,
   streetViewLib,
   onSaveCustomApiKey,
 }) => {
@@ -159,6 +196,8 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
 
   const [settings, setSettings] = useState<GameSettings>(() => ({
     mode: initialJoinCode ? 'multiplayer' : 'solo',
+    hotseatFormat: 'duel',
+    onlineFormat: 'duel',
     regionId: 'world',
     totalRounds: 5,
     timerSeconds: 0,
@@ -167,6 +206,9 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
   }));
 
   const [screen, setScreen] = useState<AppScreenState>('title');
+  const [openKeyPanelSignal, setOpenKeyPanelSignal] = useState(0);
+  const [duelCountdownSec, setDuelCountdownSec] = useState<number | null>(null);
+  const duelTimeoutSentRef = useRef(false);
   const [returnFromStatsScreen, setReturnFromStatsScreen] =
     useState<AppScreenState>('title');
   const [mapLayer, setMapLayer] = useState<MapLayerType>('roadmap');
@@ -174,6 +216,11 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
 
   const [matchHistory, setMatchHistory] = useState<MatchRecord[]>(() =>
     loadMatchHistory(),
+  );
+
+  const regionMedals = useMemo(
+    () => getRegionBestMap(matchHistory),
+    [matchHistory],
   );
 
   // Local Solo / Hotseat game state
@@ -193,6 +240,13 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
   const [hotseatPendingGuesses, setHotseatPendingGuesses] = useState<
     PlayerGuess[]
   >([]);
+  const [hotseatDuelHp, setHotseatDuelHp] = useState<Record<string, number>>({
+    local_p1: DUEL_STARTING_HP,
+    local_p2: DUEL_STARTING_HP,
+  });
+  const [hotseatDuelWinnerId, setHotseatDuelWinnerId] = useState<string | null>(
+    null,
+  );
 
   // Active playing state
   const [selectedGuess, setSelectedGuess] = useState<LatLng | null>(null);
@@ -274,6 +328,8 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
       roundStartTimestampRef.current = mp.room.roundStartedAt || Date.now();
       pausedAtRef.current = null;
       timeoutFiredRef.current = false;
+      duelTimeoutSentRef.current = false;
+      setDuelCountdownSec(null);
       setTimeLeftSec(mp.room.timerSeconds > 0 ? mp.room.timerSeconds : null);
     }
   }, [mp.room?.status, mp.room?.currentRoundIndex, mp.room?.roundStartedAt]);
@@ -296,6 +352,8 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
         const myRecs = buildMatchRecordsFromOutcomes({
           outcomes: mp.room.roundHistory,
           mode: 'multiplayer',
+          isDuel: mp.room.onlineFormat === 'duel',
+          duelWinnerId: mp.room.duelWinnerId,
           regionId: mp.room.regionId,
           movementMode: mp.room.movementMode,
           timerSeconds: mp.room.timerSeconds,
@@ -364,6 +422,11 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     }
     setLocalOutcomes([]);
     setUsedHintLabels([]);
+    setHotseatDuelHp({
+      local_p1: DUEL_STARTING_HP,
+      local_p2: DUEL_STARTING_HP,
+    });
+    setHotseatDuelWinnerId(null);
     void loadLocalRound(
       0,
       settings.regionId,
@@ -396,10 +459,16 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
       }
 
       if (!currentLocation) return;
+      const mapSizeMeters = getRegionMapSizeMeters(
+        getRegionById(settings.regionId),
+      );
       const distanceKm = guessCoords
         ? calculateDistanceKm(currentLocation, guessCoords)
         : null;
-      const score = distanceKm !== null ? calculateGeoScore(distanceKm) : 0;
+      const score =
+        distanceKm !== null
+          ? calculateGeoScore(distanceKm, mapSizeMeters)
+          : 0;
 
       soundEngine.playGuessConfirm();
 
@@ -426,7 +495,7 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
         return;
       }
 
-      // Two-Player Pass-and-Play (Hotseat)
+      // Two-Player Pass-and-Play (Hotseat Classic OR Hotseat Duel 1v1)
       const pIdx = hotseatTurnIndex;
       const playerName =
         settings.playerNames[pIdx]?.trim() || `Игрок ${pIdx + 1}`;
@@ -449,10 +518,24 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
         setScreen('handoff');
       } else {
         const allGuesses = [...hotseatPendingGuesses, guessRecord];
+        let duelDamage: RoundOutcome['duelDamage'];
+        if (settings.hotseatFormat === 'duel') {
+          const resolved = resolveDuelRoundDamage(
+            allGuesses,
+            hotseatDuelHp,
+            currentRoundIndex,
+          );
+          duelDamage = resolved.duelDamage;
+          setHotseatDuelHp(resolved.duelDamage.hpAfter);
+          if (resolved.knockoutWinnerId) {
+            setHotseatDuelWinnerId(resolved.knockoutWinnerId);
+          }
+        }
         const outcome: RoundOutcome = {
           roundIndex: currentRoundIndex,
           actual: currentLocation,
           guesses: allGuesses,
+          duelDamage,
         };
         setLocalOutcomes((prev) => [...prev, outcome]);
         setHotseatPendingGuesses([]);
@@ -464,6 +547,7 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     [
       currentLocation,
       currentRoundIndex,
+      hotseatDuelHp,
       hotseatPendingGuesses,
       hotseatTurnIndex,
       isOnlineSession,
@@ -513,10 +597,66 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     timeLeftSec,
   ]);
 
+  // Authentic GeoGuessr Duel 15-second pressure countdown after the first player guesses
+  const duelCountdownEndsAt = mp.room?.duelCountdownEndsAt ?? null;
+  useEffect(() => {
+    if (
+      !isOnlineSession ||
+      mp.room?.onlineFormat !== 'duel' ||
+      effectiveScreen !== 'playing' ||
+      duelCountdownEndsAt === null
+    ) {
+      setDuelCountdownSec(null);
+      duelTimeoutSentRef.current = false;
+      return;
+    }
+
+    const tick = () => {
+      const remainingMs = duelCountdownEndsAt - Date.now();
+      const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+      setDuelCountdownSec(remainingSec);
+
+      if (remainingSec > 0 && remainingSec <= 5) {
+        soundEngine.playTick();
+      }
+
+      if (remainingMs <= 0) {
+        if (!mp.currentPlayer?.hasGuessedCurrentRound && !duelTimeoutSentRef.current) {
+          duelTimeoutSentRef.current = true;
+          handleConfirmGuess(true);
+        }
+        // Host safety net: finalize round even if opponent dropped connection
+        if (mp.isHost && remainingMs <= -1200) {
+          mp.expireDuelCountdown();
+        }
+      }
+    };
+
+    tick();
+    const id = window.setInterval(tick, 500);
+    return () => window.clearInterval(id);
+  }, [
+    duelCountdownEndsAt,
+    effectiveScreen,
+    handleConfirmGuess,
+    isOnlineSession,
+    mp,
+    mp.currentPlayer?.hasGuessedCurrentRound,
+    mp.isHost,
+    mp.room?.onlineFormat,
+  ]);
+
   const handleNextRound = useCallback(() => {
     if (locatingRef.current) return;
     if (isOnlineSession && mp.room) {
-      if (mp.room.currentRoundIndex + 1 >= mp.room.totalRounds) {
+      const duelDone =
+        mp.room.onlineFormat === 'duel' &&
+        (mp.room.duelWinnerId !== null || mp.room.players.some((p) => p.hp <= 0));
+      if (
+        duelDone ||
+        (mp.room.onlineFormat === 'classic' &&
+          mp.room.currentRoundIndex + 1 >= mp.room.totalRounds)
+      ) {
         mp.finishMatch();
       } else {
         mp.startRound();
@@ -525,10 +665,26 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     }
 
     const nextIdx = currentRoundIndex + 1;
-    if (nextIdx >= settings.totalRounds) {
+    const isHotseatDuel =
+      settings.mode === 'hotseat' && settings.hotseatFormat === 'duel';
+    const hotseatDuelEnded =
+      isHotseatDuel &&
+      (hotseatDuelWinnerId !== null ||
+        Object.values(hotseatDuelHp).some((hp) => hp <= 0) ||
+        nextIdx >= DUEL_MAX_ROUNDS);
+
+    if (hotseatDuelEnded || (!isHotseatDuel && nextIdx >= settings.totalRounds)) {
+      const resolvedWinnerId = isHotseatDuel
+        ? hotseatDuelWinnerId ??
+          ((hotseatDuelHp.local_p1 ?? 0) >= (hotseatDuelHp.local_p2 ?? 0)
+            ? 'local_p1'
+            : 'local_p2')
+        : null;
       const recs = buildMatchRecordsFromOutcomes({
         outcomes: localOutcomes,
         mode: settings.mode,
+        isDuel: isHotseatDuel,
+        duelWinnerId: resolvedWinnerId,
         regionId: settings.regionId,
         movementMode: settings.movementMode,
         timerSeconds: settings.timerSeconds,
@@ -548,6 +704,8 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     );
   }, [
     currentRoundIndex,
+    hotseatDuelHp,
+    hotseatDuelWinnerId,
     isOnlineSession,
     loadLocalRound,
     localOutcomes,
@@ -710,16 +868,52 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     settings.mode,
   ]);
 
+  const isHotseatDuelActive =
+    !isOnlineSession &&
+    settings.mode === 'hotseat' &&
+    settings.hotseatFormat === 'duel';
+  const isOnlineDuelActive = Boolean(
+    isOnlineSession && mp.room?.onlineFormat === 'duel',
+  );
+  const isDuelActive = isOnlineDuelActive || isHotseatDuelActive;
+
+  const hotseatDuelPlayers = [
+    {
+      id: 'local_p1',
+      name: settings.playerNames[0]?.trim() || 'Игрок 1',
+      color: PLAYER_COLORS[0],
+      hp: hotseatDuelHp.local_p1 ?? DUEL_STARTING_HP,
+    },
+    {
+      id: 'local_p2',
+      name: settings.playerNames[1]?.trim() || 'Игрок 2',
+      color: PLAYER_COLORS[1],
+      hp: hotseatDuelHp.local_p2 ?? DUEL_STARTING_HP,
+    },
+  ];
+
+  const activeDuelPlayers = isOnlineDuelActive
+    ? mp.room?.players
+    : isHotseatDuelActive
+      ? hotseatDuelPlayers
+      : undefined;
+
   const hotseatScoresBanner = [
     {
       name: settings.playerNames[0]?.trim() || 'Игрок 1',
       color: PLAYER_COLORS[0],
       score: cumulativeScores['local_p1'] ?? 0,
+      hp: isHotseatDuelActive
+        ? (hotseatDuelHp.local_p1 ?? DUEL_STARTING_HP)
+        : undefined,
     },
     {
       name: settings.playerNames[1]?.trim() || 'Игрок 2',
       color: PLAYER_COLORS[1],
       score: cumulativeScores['local_p2'] ?? 0,
+      hp: isHotseatDuelActive
+        ? (hotseatDuelHp.local_p2 ?? DUEL_STARTING_HP)
+        : undefined,
     },
   ];
 
@@ -786,6 +980,10 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
         totalRounds={settings.totalRounds}
         regionName={activeRegion.name}
         isSecondPlayer={hotseatTurnIndex === 1}
+        isDuel={isHotseatDuelActive}
+        duelMultiplier={
+          isHotseatDuelActive ? getDuelMultiplier(currentRoundIndex) : 1
+        }
         scores={hotseatScoresBanner}
         onReady={() => {
           roundStartTimestampRef.current = Date.now();
@@ -798,12 +996,23 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
     );
   } else if (effectiveScreen === 'round_result' && activeOutcomes.length > 0) {
     const latest = activeOutcomes[activeOutcomes.length - 1];
+    const isDuelFinished = Boolean(
+      (isOnlineDuelActive &&
+        (mp.room?.duelWinnerId !== null ||
+          mp.room?.players.some((p) => p.hp <= 0))) ||
+        (isHotseatDuelActive &&
+          (hotseatDuelWinnerId !== null ||
+            Object.values(hotseatDuelHp).some((hp) => hp <= 0) ||
+            currentRoundIndex + 1 >= DUEL_MAX_ROUNDS)),
+    );
     overlayScreen = (
       <RoundResultView
         outcome={latest}
         totalRounds={activeTotalRounds}
         regionName={activeRegion.name}
         cumulativeScores={cumulativeScores}
+        isDuel={isDuelActive}
+        duelFinished={isDuelFinished}
         mapLayer={mapLayer}
         canAdvance={!isOnlineSession || mp.isHost}
         onChangeMapLayer={setMapLayer}
@@ -816,6 +1025,8 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
         mode={isOnlineSession ? 'multiplayer' : settings.mode}
         regionName={activeRegion.name}
         outcomes={activeOutcomes}
+        isDuel={isDuelActive}
+        duelPlayers={activeDuelPlayers}
         mapLayer={mapLayer}
         canRestart={!isOnlineSession || mp.isHost}
         onChangeMapLayer={setMapLayer}
@@ -839,11 +1050,13 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
       <TitleScreen
         settings={settings}
         totalGamesPlayed={matchHistory.length}
+        regionMedals={regionMedals}
         joinCodeInitial={initialJoinCode}
         multiplayerError={mp.error}
         hasEnvMapsKey={hasEnvMapsKey}
         savedCustomApiKey={savedCustomApiKey}
         apiKeySessionOnly={apiKeySessionOnly}
+        openKeyPanelSignal={openKeyPanelSignal}
         onSaveCustomApiKey={onSaveCustomApiKey}
         onUpdateSettings={(patch) => {
           mp.clearError();
@@ -854,6 +1067,7 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
           savedMultiplayerMatchRef.current = null;
           mp.createRoom({
             playerName: hostName,
+            onlineFormat: settings.onlineFormat,
             regionId: settings.regionId,
             totalRounds: settings.totalRounds,
             timerSeconds: settings.timerSeconds,
@@ -892,14 +1106,19 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
             movementMode={activeMovementMode}
             resetSignal={resetSignal}
             quotaExceeded={quotaExceeded}
+            mapsError={mapsError}
             hasMapsKey={hasMapsKey}
             streetViewLib={streetViewLib}
             onHeadingChange={setCompassHeading}
+            onOpenApiKeySetup={() => {
+              handleExitToTitle();
+              setOpenKeyPanelSignal((n) => n + 1);
+            }}
           />
 
           {isGameplayVisible && (
             <>
-              <CompassHud heading={compassHeading} />
+              <CompassHud heading={compassHeading} offsetForDuel={isDuelActive} />
 
               <GameHud
                 regionName={activeRegion.name}
@@ -913,7 +1132,13 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
                     : undefined
                 }
                 activePlayerColor={activePlayerColor}
+                showActiveTurnBadge={isHotseatDuelActive}
                 roomCode={mp.room?.code}
+                duelPlayers={activeDuelPlayers}
+                duelMultiplier={
+                  isDuelActive ? getDuelMultiplier(activeRoundIndex) : undefined
+                }
+                duelCountdownSec={isOnlineDuelActive ? duelCountdownSec : null}
                 movementMode={activeMovementMode}
                 muted={muted}
                 onReturnToStart={() => setResetSignal((s) => s + 1)}
@@ -951,6 +1176,7 @@ const TerraSpotterCore: React.FC<TerraSpotterCoreProps> = ({
               roundNumber={activeRoundIndex + 1}
               totalRounds={activeTotalRounds}
               score={activePlayerScore}
+              isDuel={isDuelActive}
               canRestart={!isOnlineSession}
               onResume={() => setScreen('playing')}
               onRestart={() => handleStartLocalGame()}
@@ -975,12 +1201,14 @@ const LiveStreetViewTerraSpotter: React.FC<{
   savedCustomApiKey: string;
   apiKeySessionOnly: boolean;
   quotaExceeded: boolean;
+  mapsError: MapsErrorCode;
   onSaveCustomApiKey: (key: string, sessionOnly: boolean) => void;
 }> = ({
   hasEnvMapsKey,
   savedCustomApiKey,
   apiKeySessionOnly,
   quotaExceeded,
+  mapsError,
   onSaveCustomApiKey,
 }) => {
   // Load ONLY the streetView library — zero google.maps.Map, zero geometry, zero marker
@@ -992,6 +1220,7 @@ const LiveStreetViewTerraSpotter: React.FC<{
       savedCustomApiKey={savedCustomApiKey}
       apiKeySessionOnly={apiKeySessionOnly}
       quotaExceeded={quotaExceeded}
+      mapsError={mapsError}
       streetViewLib={streetViewLib}
       onSaveCustomApiKey={onSaveCustomApiKey}
     />
@@ -1006,6 +1235,7 @@ export default function App() {
     sessionOnly: boolean;
   }>(() => loadSavedApiKey());
   const [quotaExceeded, setQuotaExceeded] = useState(false);
+  const [mapsError, setMapsError] = useState<MapsErrorCode>(null);
 
   const effectiveApiKey = savedKeyState.key.trim() || envKey;
 
@@ -1013,15 +1243,34 @@ export default function App() {
     const onQuotaExceeded = () => {
       setQuotaExceeded(true);
     };
+    const onMapsError = (e: Event) => {
+      const code = (e as CustomEvent<MapsErrorCode>).detail ?? 'auth_failure';
+      setMapsError((prev) => {
+        // Keep more specific error codes over generic auth_failure
+        if (prev && prev !== 'auth_failure' && code === 'auth_failure') return prev;
+        return code;
+      });
+    };
     window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
-    return () =>
+    window.addEventListener('gmp-maps-error', onMapsError);
+    return () => {
       window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
+      window.removeEventListener('gmp-maps-error', onMapsError);
+    };
   }, []);
 
   const handleSaveCustomApiKey = useCallback(
     (nextKey: string, sessionOnly: boolean) => {
+      const hadGoogleLoaded =
+        typeof window !== 'undefined' &&
+        Boolean(
+          (window as unknown as { google?: { maps?: unknown } }).google?.maps ||
+            document.querySelector('script[src*="maps.googleapis.com"]'),
+        );
+
       setSavedKeyState({ key: nextKey, sessionOnly });
       setQuotaExceeded(false);
+      setMapsError(null);
       try {
         window.sessionStorage.removeItem(CUSTOM_API_KEY_STORAGE);
         window.localStorage.removeItem(CUSTOM_API_KEY_STORAGE);
@@ -1035,8 +1284,14 @@ export default function App() {
       } catch {
         // Ignore storage errors
       }
+
+      // Google Maps JS API cannot swap API keys once its script tag is already injected;
+      // reload cleanly so the newly entered key takes effect immediately.
+      if (hadGoogleLoaded && nextKey.trim() !== savedKeyState.key.trim()) {
+        window.location.reload();
+      }
     },
-    [],
+    [savedKeyState.key],
   );
 
   const quotaBanner = quotaExceeded ? (
@@ -1072,6 +1327,7 @@ export default function App() {
               savedCustomApiKey={savedKeyState.key}
               apiKeySessionOnly={savedKeyState.sessionOnly}
               quotaExceeded={quotaExceeded}
+              mapsError={mapsError}
               onSaveCustomApiKey={handleSaveCustomApiKey}
             />
           </APIProvider>
@@ -1082,6 +1338,7 @@ export default function App() {
             savedCustomApiKey={savedKeyState.key}
             apiKeySessionOnly={savedKeyState.sessionOnly}
             quotaExceeded={quotaExceeded}
+            mapsError={mapsError}
             streetViewLib={null}
             onSaveCustomApiKey={handleSaveCustomApiKey}
           />

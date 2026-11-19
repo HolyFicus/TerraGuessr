@@ -2,47 +2,138 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calculateDistanceKm,
+  calculateDistanceMeters,
   calculateGeoScore,
   formatDistanceRu,
   generateCandidateCoordinate,
   getAccuracyGrade,
+  getMedalForScore,
+  getMedalThresholds,
+  getPerfectThresholdMeters,
+  getRegionMapSizeMeters,
   isProhibitedTerritory,
   MAX_ROUND_SCORE,
+  pickBestMedal,
+  WORLD_MAP_SIZE_METERS,
 } from './geoMath';
 import { REGIONS, getRegionById } from './regions';
 import { VERIFIED_SPOTS_BY_REGION, pickVerifiedSpot } from './verifiedLocations';
 
-test('calculateDistanceKm computes accurate Haversine distances', () => {
+test('calculateDistanceMeters and calculateDistanceKm compute accurate Haversine distances', () => {
   assert.equal(
     calculateDistanceKm({ lat: 48.8566, lng: 2.3522 }, { lat: 48.8566, lng: 2.3522 }),
     0,
   );
 
   // London to Paris is ~343.5 km
-  const londonParis = calculateDistanceKm(
+  const londonParisKm = calculateDistanceKm(
     { lat: 51.5074, lng: -0.1278 },
     { lat: 48.8566, lng: 2.3522 },
   );
-  assert.ok(londonParis > 340 && londonParis < 348, `Expected ~343.5km, got ${londonParis}`);
+  assert.ok(londonParisKm > 340 && londonParisKm < 348, `Expected ~343.5km, got ${londonParisKm}`);
+  assert.equal(
+    Math.round(
+      calculateDistanceMeters({ lat: 51.5074, lng: -0.1278 }, { lat: 48.8566, lng: 2.3522 }),
+    ),
+    Math.round(londonParisKm * 1000),
+  );
 
   // Antipodes ~20,015 km
   const antipodes = calculateDistanceKm({ lat: 0, lng: 0 }, { lat: 0, lng: 180 });
   assert.ok(antipodes > 20000 && antipodes < 20030, `Expected ~20015km, got ${antipodes}`);
 });
 
-test('calculateGeoScore follows exact 5000 * Math.exp(-distanceKm / 2000) formula with <0.05km = 5000', () => {
-  assert.equal(calculateGeoScore(0), MAX_ROUND_SCORE);
-  assert.equal(calculateGeoScore(0.049), MAX_ROUND_SCORE);
+test('getRegionMapSizeMeters uses exact world constant and Haversine SW-NE diagonal for countries/regions', () => {
+  const world = getRegionById('world');
+  assert.equal(getRegionMapSizeMeters(world), WORLD_MAP_SIZE_METERS);
+  assert.equal(WORLD_MAP_SIZE_METERS, 14_916_862);
 
-  // At exactly 2000 km => 5000 * e^-1 ≈ 1839
-  assert.equal(calculateGeoScore(2000), Math.round(5000 * Math.exp(-1)));
+  const europe = getRegionById('europe');
+  const france = getRegionById('france');
+  const japan = getRegionById('japan');
 
-  // At 100 km => 5000 * e^(-0.05) ≈ 4756
-  assert.equal(calculateGeoScore(100), Math.round(5000 * Math.exp(-100 / 2000)));
+  const europeSize = getRegionMapSizeMeters(europe);
+  const franceSize = getRegionMapSizeMeters(france);
+  const japanSize = getRegionMapSizeMeters(japan);
+
+  assert.ok(europeSize > franceSize, `Expected Europe (${europeSize}) > France (${franceSize})`);
+  assert.ok(
+    WORLD_MAP_SIZE_METERS > europeSize,
+    `Expected World (${WORLD_MAP_SIZE_METERS}) > Europe (${europeSize})`,
+  );
+  assert.ok(franceSize > 500_000 && franceSize < 2_500_000, `Unexpected France mapSize: ${franceSize}`);
+  assert.ok(japanSize > 1_000_000 && japanSize < 4_000_000, `Unexpected Japan mapSize: ${japanSize}`);
+});
+
+test('calculateGeoScore follows exact GeoGuessr formula with adaptive mapSize and 5K threshold', () => {
+  // World mapSize = 14,916,862 m -> perfectThreshold = max(25, 149.16862) ≈ 149.17 m
+  const worldThreshold = getPerfectThresholdMeters(WORLD_MAP_SIZE_METERS);
+  assert.ok(Math.abs(worldThreshold - 149.16862) < 0.01);
+
+  // Small country (e.g. 500 km mapSize) -> perfectThreshold clamped at 25 m
+  assert.equal(getPerfectThresholdMeters(500_000), 25);
+
+  // Within threshold => exact 5000 (5K!)
+  assert.equal(calculateGeoScore(0, WORLD_MAP_SIZE_METERS), MAX_ROUND_SCORE);
+  assert.equal(calculateGeoScore(0.149, WORLD_MAP_SIZE_METERS), MAX_ROUND_SCORE);
+  assert.equal(calculateGeoScore(0.025, 500_000), MAX_ROUND_SCORE);
+
+  // Outside threshold => Math.round(5000 * Math.exp(-10 * distanceMeters / mapSize))
+  const expectedAt1000KmWorld = Math.round(
+    5000 * Math.exp((-10 * 1_000_000) / WORLD_MAP_SIZE_METERS),
+  );
+  assert.equal(calculateGeoScore(1000, WORLD_MAP_SIZE_METERS), expectedAt1000KmWorld);
+
+  // Same 100 km error scores much stricter on France than on World
+  const franceSize = getRegionMapSizeMeters(getRegionById('france'));
+  const score100KmWorld = calculateGeoScore(100, WORLD_MAP_SIZE_METERS);
+  const score100KmFrance = calculateGeoScore(100, franceSize);
+  assert.ok(
+    score100KmFrance < score100KmWorld,
+    `Expected 100km on France (${score100KmFrance}) < World (${score100KmWorld})`,
+  );
+  assert.equal(
+    score100KmFrance,
+    Math.round(5000 * Math.exp((-10 * 100_000) / franceSize)),
+  );
 
   // Invalid or negative distance never returns NaN or negative
-  assert.equal(calculateGeoScore(-5), 0);
-  assert.equal(calculateGeoScore(Number.NaN), 0);
+  assert.equal(calculateGeoScore(-5, WORLD_MAP_SIZE_METERS), 0);
+  assert.equal(calculateGeoScore(Number.NaN, WORLD_MAP_SIZE_METERS), 0);
+});
+
+test('GeoGuessr medal tiers match 5-round official thresholds and scale proportionally for 1-10 rounds', () => {
+  // Exact 5-round (25,000 max) thresholds
+  assert.equal(getMedalForScore(25000, 25000), 'platinum');
+  assert.equal(getMedalForScore(24999, 25000), 'gold');
+  assert.equal(getMedalForScore(22500, 25000), 'gold');
+  assert.equal(getMedalForScore(22499, 25000), 'silver');
+  assert.equal(getMedalForScore(15000, 25000), 'silver');
+  assert.equal(getMedalForScore(14999, 25000), 'bronze');
+  assert.equal(getMedalForScore(5000, 25000), 'bronze');
+  assert.equal(getMedalForScore(4999, 25000), 'none');
+  assert.equal(getMedalForScore(0, 25000), 'none');
+
+  // 10-round (50,000 max) proportional thresholds
+  assert.equal(getMedalForScore(50000, 50000), 'platinum');
+  assert.equal(getMedalForScore(45000, 50000), 'gold');
+  assert.equal(getMedalForScore(30000, 50000), 'silver');
+  assert.equal(getMedalForScore(10000, 50000), 'bronze');
+  assert.equal(getMedalForScore(9999, 50000), 'none');
+
+  assert.equal(pickBestMedal('bronze', 'gold'), 'gold');
+  assert.equal(pickBestMedal('platinum', 'silver'), 'platinum');
+
+  const thresholds5 = getMedalThresholds(25000);
+  assert.deepEqual(
+    thresholds5.map((t) => [t.tier, t.minScore]),
+    [
+      ['bronze', 5000],
+      ['silver', 15000],
+      ['gold', 22500],
+      ['platinum', 25000],
+    ],
+  );
 });
 
 test('prohibited territories guard excludes restricted regions and allows valid regions', () => {
@@ -91,8 +182,8 @@ test('every bounding box and generated coordinate across all 21 regions/countrie
 
 test('formatDistanceRu and getAccuracyGrade produce readable Russian output', () => {
   assert.equal(formatDistanceRu(null), 'Нет ответа');
-  assert.equal(formatDistanceRu(0.45), '450 м');
-  assert.equal(formatDistanceRu(12.34), '12,3 км');
+  assert.equal(formatDistanceRu(0.142), '142 м');
+  assert.equal(formatDistanceRu(12.43), '12.4 км');
   assert.equal(getAccuracyGrade(23500, 25000).grade, 'S');
   assert.equal(getAccuracyGrade(19500, 25000).grade, 'A');
   assert.equal(getRegionById('nonexistent').id, 'world');

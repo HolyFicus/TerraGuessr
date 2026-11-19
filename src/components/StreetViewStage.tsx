@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Compass, Lock, RotateCcw } from 'lucide-react';
+import { Compass, KeyRound, Loader2, Lock, RotateCcw } from 'lucide-react';
 import type { MovementMode, RoundLocation } from '../game/types';
+
+export type MapsErrorCode =
+  | 'quota'
+  | 'referer'
+  | 'billing'
+  | 'invalid_key'
+  | 'auth_failure'
+  | null;
 
 interface StreetViewStageProps {
   visible?: boolean;
@@ -8,9 +16,11 @@ interface StreetViewStageProps {
   movementMode: MovementMode;
   resetSignal: number;
   quotaExceeded: boolean;
+  mapsError?: MapsErrorCode;
   hasMapsKey: boolean;
   streetViewLib: google.maps.StreetViewLibrary | null;
   onHeadingChange: (heading: number) => void;
+  onOpenApiKeySetup?: () => void;
 }
 
 export const StreetViewStage: React.FC<StreetViewStageProps> = ({
@@ -19,9 +29,11 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
   movementMode,
   resetSignal,
   quotaExceeded,
+  mapsError = null,
   hasMapsKey,
   streetViewLib,
   onHeadingChange,
+  onOpenApiKeySetup,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const panoramaRef = useRef<google.maps.StreetViewPanorama | null>(null);
@@ -35,8 +47,12 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
   const [isDraggingFallback, setIsDraggingFallback] = useState(false);
   const dragStartRef = useRef<{ x: number; heading: number } | null>(null);
 
+  // Do not gate on location.isLiveStreetView so live panoramas still appear if
+  // streetViewLib finishes loading right after the user clicks Play.
+  const isWaitingForLibrary =
+    hasMapsKey && !quotaExceeded && !mapsError && !streetViewLib;
   const shouldUseLiveStreetView =
-    hasMapsKey && !quotaExceeded && Boolean(streetViewLib) && location.isLiveStreetView;
+    hasMapsKey && !quotaExceeded && !mapsError && Boolean(streetViewLib);
 
   const isMovingAllowed = movementMode === 'moving';
   const isNmpz = movementMode === 'nmpz';
@@ -273,10 +289,16 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
             style={{ backgroundColor: 'rgba(11, 18, 32, 0.90)' }}
           >
             <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-400">
-              <Compass className="h-5 w-5" />
+              {isWaitingForLibrary ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                <Compass className="h-5 w-5" />
+              )}
             </div>
             <p className="font-display text-lg font-semibold text-slate-100">
-              Автономный режим наблюдения 360°
+              {isWaitingForLibrary
+                ? 'Загрузка Google Street View...'
+                : 'Автономный режим наблюдения 360°'}
             </p>
             <p className="mt-1.5 text-sm text-slate-300">{climateBand}</p>
             <p className="mt-1 text-xs text-slate-400">
@@ -285,7 +307,49 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
                 ? 'Режим NMPZ: камера зафиксирована'
                 : 'Перетаскивайте панораму мышью, чтобы сверить солнце и компас'}
             </p>
-            <div className="mt-4 flex items-center justify-center gap-3 text-xs text-slate-400">
+
+            {!isWaitingForLibrary && (
+              <div className="mt-3.5 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-300">
+                {!hasMapsKey && (
+                  <span>
+                    Для живых 360°-панорам Google Street View укажите ваш Google Maps API-ключ.
+                  </span>
+                )}
+                {hasMapsKey && mapsError === 'referer' && (
+                  <span>
+                    Домен <code className="text-amber-300">{window.location.origin}</code> не разрешён в настройках HTTP Referrer вашего ключа Google Cloud.
+                  </span>
+                )}
+                {hasMapsKey && mapsError === 'billing' && (
+                  <span>
+                    В Google Cloud не включён Maps JavaScript API или не привязан биллинг-аккаунт (бесплатная квота требует активации биллинга).
+                  </span>
+                )}
+                {hasMapsKey && mapsError === 'invalid_key' && (
+                  <span>
+                    Указанный Google Maps API-ключ недействителен — проверьте ключ без лишних пробелов.
+                  </span>
+                )}
+                {hasMapsKey && (mapsError === 'quota' || (quotaExceeded && !mapsError)) && (
+                  <span>
+                    Квота Google Maps исчерпана — включён бесплатный автономный режим.
+                  </span>
+                )}
+                {hasMapsKey && mapsError === 'auth_failure' && (
+                  <span>
+                    Google Maps отклонил ключ (проверьте HTTP Referrer для{' '}
+                    <code className="text-amber-300">{window.location.origin}/*</code> и биллинг в Google Cloud).
+                  </span>
+                )}
+                {hasMapsKey && !mapsError && !quotaExceeded && (
+                  <span>
+                    В выбранной точке нет панорамы Street View — используйте компас и карту Leaflet.
+                  </span>
+                )}
+              </div>
+            )}
+
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-xs text-slate-400">
               <span className="font-mono tabular-nums text-amber-300">
                 Азимут {Math.round(fallbackHeading)}°
               </span>
@@ -305,6 +369,24 @@ export const StreetViewStage: React.FC<StreetViewStageProps> = ({
                   </button>
                 </>
               )}
+              {onOpenApiKeySetup &&
+                (!hasMapsKey ||
+                  mapsError === 'invalid_key' ||
+                  mapsError === 'referer' ||
+                  mapsError === 'billing' ||
+                  mapsError === 'auth_failure') && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <button
+                      type="button"
+                      onClick={onOpenApiKeySetup}
+                      className="inline-flex cursor-pointer items-center gap-1.5 font-semibold text-amber-400 underline-offset-4 hover:text-amber-300 hover:underline"
+                    >
+                      <KeyRound className="h-3.5 w-3.5" />
+                      Настроить API-ключ
+                    </button>
+                  </>
+                )}
             </div>
           </div>
         </div>

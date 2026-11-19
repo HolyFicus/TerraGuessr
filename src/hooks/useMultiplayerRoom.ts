@@ -3,6 +3,7 @@ import Peer, { type DataConnection } from 'peerjs';
 import {
   createRoom as createRoomModel,
   disconnectPlayer,
+  expirePendingDuelGuesses,
   finishMatch as finishMatchModel,
   generateInviteCode,
   inviteCodeToPeerId,
@@ -22,6 +23,7 @@ import type {
   LatLng,
   MovementMode,
   MultiplayerRoomPublicState,
+  OnlineFormat,
   RoundLocation,
 } from '../game/types';
 
@@ -49,6 +51,7 @@ function getOrCreateClientId(): string {
 
 export interface CreateRoomParams {
   playerName: string;
+  onlineFormat: OnlineFormat;
   regionId: string;
   totalRounds: number;
   timerSeconds: number;
@@ -158,6 +161,7 @@ export function useMultiplayerRoom(
         code,
         hostId: clientId,
         hostName: params.playerName,
+        onlineFormat: params.onlineFormat,
         regionId: params.regionId,
         totalRounds: params.totalRounds,
         timerSeconds: params.timerSeconds,
@@ -436,6 +440,13 @@ export function useMultiplayerRoom(
     [broadcastFromHost, clientId],
   );
 
+  const expireDuelCountdown = useCallback(() => {
+    const internal = hostRoomRef.current;
+    if (!internal) return;
+    const res = expirePendingDuelGuesses(internal, clientId, distanceFnRef.current);
+    if (res.ok) broadcastFromHost();
+  }, [broadcastFromHost, clientId]);
+
   const finishMatch = useCallback(() => {
     const internal = hostRoomRef.current;
     if (!internal) return;
@@ -467,6 +478,7 @@ export function useMultiplayerRoom(
     startRound,
     publishLocation,
     submitGuess,
+    expireDuelCountdown,
     finishMatch,
     resetRoom,
   };

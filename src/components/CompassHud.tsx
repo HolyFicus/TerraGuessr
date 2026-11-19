@@ -2,6 +2,7 @@ import React from 'react';
 
 interface CompassHudProps {
   heading: number;
+  offsetForDuel?: boolean;
 }
 
 const CARDINALS: Array<{ deg: number; label: string; major: boolean }> = [
@@ -20,7 +21,10 @@ function normalizeHeading(deg: number): number {
   return mod < 0 ? mod + 360 : mod;
 }
 
-export const CompassHud: React.FC<CompassHudProps> = ({ heading }) => {
+export const CompassHud: React.FC<CompassHudProps> = ({
+  heading,
+  offsetForDuel = false,
+}) => {
   const norm = normalizeHeading(heading);
   const pxPerDeg = 2.4; // 360 deg = 864px strip
 
@@ -41,7 +45,9 @@ export const CompassHud: React.FC<CompassHudProps> = ({ heading }) => {
 
   return (
     <div
-      className="pointer-events-none absolute top-16 left-1/2 z-20 -translate-x-1/2 select-none sm:top-3.5 landscape-phone:top-2"
+      className={`pointer-events-none absolute left-1/2 z-20 -translate-x-1/2 select-none sm:top-3.5 landscape-phone:top-2 ${
+        offsetForDuel ? 'top-[108px]' : 'top-16'
+      }`}
       aria-label={`Компас: ${Math.round(norm)}°`}
     >
       <div

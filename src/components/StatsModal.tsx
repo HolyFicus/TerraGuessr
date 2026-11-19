@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowLeft, Trash2, Trophy } from 'lucide-react';
-import { formatDistanceRu, formatScore } from '../game/geoMath';
+import { ArrowLeft, Swords, Trash2, Trophy } from 'lucide-react';
+import { formatDistanceRu, formatScore, getMedalForScore } from '../game/geoMath';
 import { computeStatsSummary, getDistinctPlayers } from '../game/statsStorage';
 import type { MatchRecord } from '../game/types';
+import { MedalIcon } from './MedalIcon';
 
 interface StatsModalProps {
   records: MatchRecord[];
@@ -32,11 +33,16 @@ export const StatsModal: React.FC<StatsModalProps> = ({
     [records, selectedPlayer],
   );
 
-  const modeLabel = (mode: MatchRecord['mode']) => {
-    if (mode === 'solo') return 'Одиночная';
-    if (mode === 'hotseat') return '2 игрока';
+  const modeLabel = (rec: MatchRecord) => {
+    if (rec.isDuel) {
+      return rec.mode === 'hotseat' ? 'Дуэль (2 игрока)' : 'Дуэль (P2P)';
+    }
+    if (rec.mode === 'solo') return 'Одиночная';
+    if (rec.mode === 'hotseat') return '2 игрока';
     return 'Онлайн';
   };
+
+  const hasDuels = summary.duelWins + summary.duelLosses > 0;
 
   return (
     <div
@@ -136,13 +142,17 @@ export const StatsModal: React.FC<StatsModalProps> = ({
               Пока нет завершённых игр
             </h3>
             <p className="mt-1 max-w-md text-sm text-slate-400">
-              Сыграйте первую партию в одиночном режиме, вдвоём на одном устройстве или по коду комнаты — ваши результаты и точность появятся здесь автоматически.
+              Сыграйте первую партию в одиночном режиме, вдвоём на одном устройстве или в дуэли по коду — ваши медали, рекорды и статистика дуэлей появятся здесь автоматически.
             </p>
           </div>
         ) : (
           <>
             {/* Unboxed KPI Summary Strip */}
-            <div className="grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-[#131D31] p-5 sm:grid-cols-4">
+            <div
+              className={`grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-[#131D31] p-5 ${
+                hasDuels ? 'sm:grid-cols-5' : 'sm:grid-cols-4'
+              }`}
+            >
               <div>
                 <div className="text-xs text-slate-400">Сыграно игр</div>
                 <div className="mt-1 font-mono text-2xl font-bold tabular-nums text-white">
@@ -167,27 +177,45 @@ export const StatsModal: React.FC<StatsModalProps> = ({
                   {formatDistanceRu(summary.avgDistanceKm)}
                 </div>
               </div>
+              {hasDuels && (
+                <div>
+                  <div className="inline-flex items-center gap-1 text-xs text-slate-400">
+                    <Swords className="h-3 w-3 text-amber-400" aria-hidden="true" />
+                    <span>Дуэли (П / Пр)</span>
+                  </div>
+                  <div className="mt-1 font-mono text-2xl font-bold tabular-nums">
+                    <span className="text-emerald-400">{summary.duelWins}</span>
+                    <span className="mx-1 text-slate-500">/</span>
+                    <span className="text-rose-400">{summary.duelLosses}</span>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Regional Breakdown */}
+            {/* Explorer Mode Regional Breakdown with Best Medals */}
             {summary.regionBreakdown.length > 0 && (
               <section>
                 <h3 className="mb-3 font-display text-sm font-bold text-slate-200">
-                  Рекорды по регионам и странам
+                  Медали и рекорды по регионам и странам
                 </h3>
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
                   {summary.regionBreakdown.map((reg) => (
                     <div
                       key={reg.regionId}
-                      className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#131D31] px-4 py-3"
+                      className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-[#131D31] px-4 py-3"
                     >
-                      <div>
-                        <div className="font-semibold text-white">{reg.regionName}</div>
-                        <div className="text-xs text-slate-400 tabular-nums">
-                          Игр: {reg.games} · Средний: {formatScore(reg.avgScore)}
+                      <div className="flex min-w-0 items-center gap-3">
+                        <MedalIcon tier={reg.bestMedal} size="md" />
+                        <div className="min-w-0">
+                          <div className="truncate font-semibold text-white">
+                            {reg.regionName}
+                          </div>
+                          <div className="text-xs text-slate-400 tabular-nums">
+                            Игр: {reg.games} · Средний: {formatScore(reg.avgScore)}
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
+                      <div className="shrink-0 text-right">
                         <div className="font-mono text-base font-bold tabular-nums text-amber-400">
                           {formatScore(reg.bestScore)}
                         </div>
@@ -214,40 +242,66 @@ export const StatsModal: React.FC<StatsModalProps> = ({
                       <th className="px-4 py-2.5 font-medium">Игрок</th>
                       <th className="px-4 py-2.5 font-medium">Карта</th>
                       <th className="px-4 py-2.5 font-medium">Режим</th>
-                      <th className="px-4 py-2.5 font-medium text-right">Средняя ошибка</th>
+                      <th className="px-4 py-2.5 font-medium">Награда</th>
+                      <th className="px-4 py-2.5 font-medium text-right">Ср. ошибка</th>
                       <th className="px-4 py-2.5 font-medium text-right">Очки</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/80">
-                    {visibleHistory.slice(0, 30).map((rec) => (
-                      <tr key={rec.id} className="hover:bg-slate-800/35">
-                        <td className="px-4 py-2.5 whitespace-nowrap text-slate-400 tabular-nums">
-                          {new Date(rec.timestamp).toLocaleDateString('ru-RU', {
-                            day: '2-digit',
-                            month: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </td>
-                        <td className="px-4 py-2.5 font-semibold text-white">
-                          {rec.playerName}
-                          {rec.won ? ' ★' : ''}
-                        </td>
-                        <td className="px-4 py-2.5 text-slate-300">{rec.regionName}</td>
-                        <td className="px-4 py-2.5 text-slate-400">
-                          {modeLabel(rec.mode)} · {rec.totalRounds}р
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono tabular-nums text-slate-300">
-                          {formatDistanceRu(rec.avgDistanceKm)}
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono font-bold tabular-nums text-amber-400">
-                          {formatScore(rec.totalScore)}
-                          <span className="font-normal text-slate-500">
-                            /{formatScore(rec.maxPossibleScore)}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {visibleHistory.slice(0, 30).map((rec) => {
+                      const recMedal = rec.isDuel
+                        ? 'none'
+                        : rec.medal ??
+                          getMedalForScore(rec.totalScore, rec.maxPossibleScore);
+                      return (
+                        <tr key={rec.id} className="hover:bg-slate-800/35">
+                          <td className="px-4 py-2.5 whitespace-nowrap text-slate-400 tabular-nums">
+                            {new Date(rec.timestamp).toLocaleDateString('ru-RU', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="px-4 py-2.5 font-semibold text-white">
+                            {rec.playerName}
+                            {rec.won ? ' ★' : ''}
+                          </td>
+                          <td className="px-4 py-2.5 text-slate-300">{rec.regionName}</td>
+                          <td className="px-4 py-2.5 whitespace-nowrap text-slate-400">
+                            {modeLabel(rec)} · {rec.totalRounds}р
+                          </td>
+                          <td className="px-4 py-2.5 whitespace-nowrap">
+                            {rec.isDuel ? (
+                              <span
+                                className={`inline-flex items-center gap-1 font-semibold ${
+                                  rec.won ? 'text-emerald-400' : 'text-rose-400'
+                                }`}
+                              >
+                                <Swords className="h-3 w-3" aria-hidden="true" />
+                                {rec.won ? 'Победа' : 'Поражение'}
+                              </span>
+                            ) : (
+                              <MedalIcon
+                                tier={recMedal}
+                                size="xs"
+                                showLabel
+                                className="text-xs"
+                              />
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono tabular-nums text-slate-300">
+                            {formatDistanceRu(rec.avgDistanceKm)}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono font-bold tabular-nums text-amber-400">
+                            {formatScore(rec.totalScore)}
+                            <span className="font-normal text-slate-500">
+                              /{formatScore(rec.maxPossibleScore)}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

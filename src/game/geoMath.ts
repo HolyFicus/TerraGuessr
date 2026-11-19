@@ -1,10 +1,11 @@
-import type { GeoBounds, LatLng, RegionDefinition } from './types';
+import type { GeoBounds, LatLng, MedalTier, RegionDefinition } from './types';
 
-const EARTH_RADIUS_KM = 6371.0088;
+const EARTH_RADIUS_M = 6371008.8;
 
 export const MAX_ROUND_SCORE = 5000;
-export const PERFECT_DISTANCE_KM = 0.05; // < 50 meters = exact 5000 points
-export const SCORE_DECAY_KM = 2000; // 5000 * Math.exp(-distanceKm / 2000)
+export const WORLD_MAP_SIZE_METERS = 14_916_862;
+export const MIN_ROUNDS = 1;
+export const MAX_ROUNDS = 10;
 
 /**
  * Bounding boxes for Google Maps Platform Prohibited Territories
@@ -47,9 +48,9 @@ export function isProhibitedTerritory(point: LatLng): boolean {
 }
 
 /**
- * Pure Haversine spherical distance in kilometers (used in Node tests & offline mode).
+ * Pure Haversine spherical distance in meters.
  */
-export function calculateDistanceKm(a: LatLng, b: LatLng): number {
+export function calculateDistanceMeters(a: LatLng, b: LatLng): number {
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
   const dLng = toRad(b.lng - a.lng);
@@ -61,19 +62,223 @@ export function calculateDistanceKm(a: LatLng, b: LatLng): number {
   const h =
     sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
   const clampedH = Math.min(1, Math.max(0, h));
-  return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(clampedH));
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(clampedH));
 }
 
 /**
- * GeoGuessr exponential scoring formula:
- * - distance < 0.05 km (50 m) => 5000 points
- * - otherwise => Math.round(5000 * Math.exp(-distanceKm / 2000))
+ * Pure Haversine spherical distance in kilometers.
  */
-export function calculateGeoScore(distanceKm: number): number {
+export function calculateDistanceKm(a: LatLng, b: LatLng): number {
+  return calculateDistanceMeters(a, b) / 1000;
+}
+
+/**
+ * Adaptive GeoGuessr mapSize (in meters) for a region or country:
+ * - "world" uses the exact GeoGuessr global diagonal constant (14,916,862 m).
+ * - Every other region/country computes the Haversine distance between the
+ *   southwest (minLat, minLng) and northeast (maxLat, maxLng) corners of its
+ *   combined bounding box.
+ */
+export function getRegionMapSizeMeters(region: RegionDefinition): number {
+  if (region.id === 'world' || region.bounds.length === 0) {
+    return WORLD_MAP_SIZE_METERS;
+  }
+
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+
+  for (const b of region.bounds) {
+    if (b.minLat < minLat) minLat = b.minLat;
+    if (b.maxLat > maxLat) maxLat = b.maxLat;
+    if (b.minLng < minLng) minLng = b.minLng;
+    if (b.maxLng > maxLng) maxLng = b.maxLng;
+  }
+
+  const diagonalMeters = calculateDistanceMeters(
+    { lat: minLat, lng: minLng },
+    { lat: maxLat, lng: maxLng },
+  );
+  return Math.max(1000, Math.round(diagonalMeters));
+}
+
+/**
+ * Exact GeoGuessr 5K perfect hit threshold in meters:
+ * Math.max(25, mapSize * 0.00001)
+ */
+export function getPerfectThresholdMeters(
+  mapSizeMeters: number = WORLD_MAP_SIZE_METERS,
+): number {
+  const safeSize =
+    Number.isFinite(mapSizeMeters) && mapSizeMeters > 0
+      ? mapSizeMeters
+      : WORLD_MAP_SIZE_METERS;
+  return Math.max(25, safeSize * 0.00001);
+}
+
+/**
+ * Exact GeoGuessr exponential scoring formula (0–5000):
+ * - distanceMeters <= Math.max(25, mapSize * 0.00001) => exact 5000 points
+ * - otherwise => Math.max(0, Math.round(5000 * Math.exp(-10 * distanceMeters / mapSize)))
+ */
+export function calculateGeoScore(
+  distanceKm: number,
+  mapSizeMeters: number = WORLD_MAP_SIZE_METERS,
+): number {
   if (!Number.isFinite(distanceKm) || distanceKm < 0) return 0;
-  if (distanceKm < PERFECT_DISTANCE_KM) return MAX_ROUND_SCORE;
-  const raw = MAX_ROUND_SCORE * Math.exp(-distanceKm / SCORE_DECAY_KM);
+  const safeMapSize =
+    Number.isFinite(mapSizeMeters) && mapSizeMeters > 0
+      ? mapSizeMeters
+      : WORLD_MAP_SIZE_METERS;
+  const distanceMeters = distanceKm * 1000;
+  const perfectThreshold = getPerfectThresholdMeters(safeMapSize);
+  if (distanceMeters <= perfectThreshold) return MAX_ROUND_SCORE;
+  const raw = MAX_ROUND_SCORE * Math.exp((-10 * distanceMeters) / safeMapSize);
   return Math.max(0, Math.min(MAX_ROUND_SCORE, Math.round(raw)));
+}
+
+export const MEDAL_RANK: Record<MedalTier, number> = {
+  none: 0,
+  bronze: 1,
+  silver: 2,
+  gold: 3,
+  platinum: 4,
+};
+
+/**
+ * Official GeoGuessr Explorer Medal thresholds adapted proportionally for 1–10 rounds
+ * (exact match for 5 rounds out of 25,000:
+ *  25,000 = Platinum, 22,500–24,999 = Gold, 15,000–22,499 = Silver, 5,000–14,999 = Bronze).
+ */
+export function getMedalForScore(
+  totalScore: number,
+  maxPossibleScore: number,
+): MedalTier {
+  if (
+    !Number.isFinite(totalScore) ||
+    !Number.isFinite(maxPossibleScore) ||
+    maxPossibleScore <= 0
+  ) {
+    return 'none';
+  }
+  const roundedScore = Math.round(totalScore);
+  const roundedMax = Math.round(maxPossibleScore);
+  if (roundedScore >= roundedMax) return 'platinum';
+  const ratio = roundedScore / roundedMax;
+  if (ratio >= 0.9) return 'gold';
+  if (ratio >= 0.6) return 'silver';
+  if (ratio >= 0.2) return 'bronze';
+  return 'none';
+}
+
+export function pickBestMedal(a: MedalTier, b: MedalTier): MedalTier {
+  return MEDAL_RANK[a] >= MEDAL_RANK[b] ? a : b;
+}
+
+export interface MedalMeta {
+  tier: MedalTier;
+  label: string;
+  shortLabel: string;
+  color: string;
+  textClass: string;
+  borderClass: string;
+  bgClass: string;
+}
+
+export function getMedalMeta(tier: MedalTier): MedalMeta {
+  switch (tier) {
+    case 'platinum':
+      return {
+        tier,
+        label: 'Платина',
+        shortLabel: 'Платина',
+        color: '#67E8F9',
+        textClass: 'text-cyan-300',
+        borderClass: 'border-cyan-400/50',
+        bgClass: 'bg-cyan-400/10',
+      };
+    case 'gold':
+      return {
+        tier,
+        label: 'Золото',
+        shortLabel: 'Золото',
+        color: '#FBBF24',
+        textClass: 'text-amber-300',
+        borderClass: 'border-amber-400/50',
+        bgClass: 'bg-amber-400/10',
+      };
+    case 'silver':
+      return {
+        tier,
+        label: 'Серебро',
+        shortLabel: 'Серебро',
+        color: '#CBD5E1',
+        textClass: 'text-slate-200',
+        borderClass: 'border-slate-300/45',
+        bgClass: 'bg-slate-300/10',
+      };
+    case 'bronze':
+      return {
+        tier,
+        label: 'Бронза',
+        shortLabel: 'Бронза',
+        color: '#EA8C4F',
+        textClass: 'text-orange-300',
+        borderClass: 'border-orange-400/45',
+        bgClass: 'bg-orange-500/10',
+      };
+    default:
+      return {
+        tier: 'none',
+        label: 'Без медали',
+        shortLabel: '—',
+        color: '#64748B',
+        textClass: 'text-slate-400',
+        borderClass: 'border-slate-700',
+        bgClass: 'bg-slate-800/40',
+      };
+  }
+}
+
+export function getMedalThresholds(maxPossibleScore: number): Array<{
+  tier: Exclude<MedalTier, 'none'>;
+  label: string;
+  minScore: number;
+  percent: number;
+  color: string;
+}> {
+  const safeMax = Math.max(MAX_ROUND_SCORE, Math.round(maxPossibleScore));
+  return [
+    {
+      tier: 'bronze',
+      label: 'Бронза',
+      minScore: Math.round(safeMax * 0.2),
+      percent: 20,
+      color: '#EA8C4F',
+    },
+    {
+      tier: 'silver',
+      label: 'Серебро',
+      minScore: Math.round(safeMax * 0.6),
+      percent: 60,
+      color: '#CBD5E1',
+    },
+    {
+      tier: 'gold',
+      label: 'Золото',
+      minScore: Math.round(safeMax * 0.9),
+      percent: 90,
+      color: '#FBBF24',
+    },
+    {
+      tier: 'platinum',
+      label: 'Платина',
+      minScore: safeMax,
+      percent: 100,
+      color: '#67E8F9',
+    },
+  ];
 }
 
 /**
@@ -112,11 +317,12 @@ export function generateCandidateCoordinate(
 
 export function formatDistanceRu(distanceKm: number | null): string {
   if (distanceKm === null || !Number.isFinite(distanceKm)) return 'Нет ответа';
-  if (distanceKm < 1) {
-    return `${Math.round(distanceKm * 1000)} м`;
+  const meters = distanceKm * 1000;
+  if (meters < 1000) {
+    return `${Math.round(meters)} м`;
   }
-  if (distanceKm < 100) {
-    return `${distanceKm.toFixed(1).replace('.', ',')} км`;
+  if (distanceKm < 1000) {
+    return `${distanceKm.toFixed(1)} км`;
   }
   return `${Math.round(distanceKm).toLocaleString('ru-RU')} км`;
 }

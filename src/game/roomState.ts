@@ -1,14 +1,97 @@
-import { calculateDistanceKm, calculateGeoScore, PLAYER_COLORS } from './geoMath';
+import {
+  calculateDistanceKm,
+  calculateGeoScore,
+  getRegionMapSizeMeters,
+  PLAYER_COLORS,
+} from './geoMath';
 import { getRegionById } from './regions';
 import type {
+  DuelRoundDamage,
   LatLng,
   MovementMode,
   MultiplayerPlayer,
   MultiplayerRoomPublicState,
+  OnlineFormat,
   PlayerGuess,
   RoundLocation,
   RoundOutcome,
 } from './types';
+
+export const DUEL_STARTING_HP = 6000;
+export const DUEL_LOCKOUT_SECONDS = 15;
+export const DUEL_MAX_ROUNDS = 30;
+
+/**
+ * Escalating GeoGuessr-style Duel damage multiplier:
+ * Rounds 1-4 => x1.0, Round 5 => x1.5, Round 6 => x2.0, Round 7 => x2.5, etc.
+ * Formula: round <= 4 ? 1 : 1 + (round - 4) * 0.5
+ */
+export function getDuelMultiplier(roundIndex: number): number {
+  const round = roundIndex + 1;
+  if (round <= 4) return 1;
+  return 1 + (round - 4) * 0.5;
+}
+
+/**
+ * Pure shared resolver for a 1v1 Duel round (used by both Hotseat Duels and PeerJS Online Duels).
+ */
+export function resolveDuelRoundDamage(
+  guesses: PlayerGuess[],
+  currentHp: Record<string, number>,
+  roundIndex: number,
+): { duelDamage: DuelRoundDamage; knockoutWinnerId: string | null } {
+  const multiplier = getDuelMultiplier(roundIndex);
+  const hpBefore: Record<string, number> = {};
+  const hpAfter: Record<string, number> = {};
+
+  for (const g of guesses) {
+    const startHp =
+      typeof currentHp[g.playerId] === 'number' && Number.isFinite(currentHp[g.playerId])
+        ? Math.max(0, Math.round(currentHp[g.playerId]))
+        : DUEL_STARTING_HP;
+    hpBefore[g.playerId] = startHp;
+    hpAfter[g.playerId] = startHp;
+  }
+
+  if (guesses.length < 2) {
+    return {
+      duelDamage: {
+        multiplier,
+        damage: 0,
+        winnerPlayerId: null,
+        loserPlayerId: null,
+        hpBefore,
+        hpAfter,
+      },
+      knockoutWinnerId: null,
+    };
+  }
+
+  const [first, second] = [...guesses].sort((a, b) => b.score - a.score);
+  const diff = Math.max(0, first.score - second.score);
+  const damage = Math.round(diff * multiplier);
+  let knockoutWinnerId: string | null = null;
+
+  if (damage > 0) {
+    const nextLoserHp = Math.max(0, (hpAfter[second.playerId] ?? DUEL_STARTING_HP) - damage);
+    hpAfter[second.playerId] = nextLoserHp;
+    if (nextLoserHp <= 0) {
+      knockoutWinnerId = first.playerId;
+    }
+  }
+
+  return {
+    duelDamage: {
+      multiplier,
+      damage,
+      winnerPlayerId: damage > 0 ? first.playerId : null,
+      loserPlayerId: damage > 0 ? second.playerId : null,
+      hpBefore,
+      hpAfter,
+    },
+    knockoutWinnerId,
+  };
+}
 
 export interface InternalRoomPlayer extends MultiplayerPlayer {
   currentGuess: LatLng | null;
@@ -18,6 +101,7 @@ export interface InternalRoomPlayer extends MultiplayerPlayer {
 export interface InternalRoom {
   code: string;
   hostId: string;
+  onlineFormat: OnlineFormat;
   status: 'lobby' | 'locating' | 'playing' | 'round_result' | 'gameover';
   regionId: string;
   totalRounds: number;
@@ -25,6 +109,8 @@ export interface InternalRoom {
   movementMode: MovementMode;
   currentRoundIndex: number;
   roundStartedAt: number | null;
+  duelCountdownEndsAt: number | null;
+  duelWinnerId: string | null;
   currentLocation: RoundLocation | null;
   players: InternalRoomPlayer[];
   roundHistory: RoundOutcome[];
@@ -41,6 +127,7 @@ const VALID_STATUSES = new Set([
   'gameover',
 ]);
 const VALID_MOVEMENT_MODES = new Set<MovementMode>(['moving', 'no_move', 'nmpz']);
+const VALID_ONLINE_FORMATS = new Set<OnlineFormat>(['duel', 'classic']);
 
 function secureRandomIndex(max: number, rng?: () => number): number {
   if (rng) {
@@ -175,7 +262,13 @@ export function sanitizePublicRoomState(
   if (typeof r.code !== 'string' || typeof r.hostId !== 'string') return null;
   if (typeof r.status !== 'string' || !VALID_STATUSES.has(r.status)) return null;
   if (!Array.isArray(r.players) || r.players.length > 12) return null;
-  if (!Array.isArray(r.roundHistory) || r.roundHistory.length > 20) return null;
+  if (!Array.isArray(r.roundHistory) || r.roundHistory.length > DUEL_MAX_ROUNDS) return null;
+
+  const onlineFormat: OnlineFormat =
+    typeof r.onlineFormat === 'string' &&
+    VALID_ONLINE_FORMATS.has(r.onlineFormat as OnlineFormat)
+      ? (r.onlineFormat as OnlineFormat)
+      : 'classic';
 
   const movementMode: MovementMode =
     typeof r.movementMode === 'string' &&
@@ -183,6 +276,7 @@ export function sanitizePublicRoomState(
       ? (r.movementMode as MovementMode)
       : 'moving';
 
+  const maxAllowedScore = onlineFormat === 'duel' ? 200_000 : 100_000;
   const players: MultiplayerPlayer[] = [];
   for (let i = 0; i < r.players.length; i++) {
     const p = r.players[i];
@@ -199,8 +293,12 @@ export function sanitizePublicRoomState(
       connected: Boolean(po.connected),
       totalScore:
         typeof po.totalScore === 'number' && Number.isFinite(po.totalScore)
-          ? Math.max(0, Math.min(100_000, Math.round(po.totalScore)))
+          ? Math.max(0, Math.min(maxAllowedScore, Math.round(po.totalScore)))
           : 0,
+      hp:
+        typeof po.hp === 'number' && Number.isFinite(po.hp)
+          ? Math.max(0, Math.min(DUEL_STARTING_HP, Math.round(po.hp)))
+          : DUEL_STARTING_HP,
       hasGuessedCurrentRound: Boolean(po.hasGuessedCurrentRound),
       readyForNext: Boolean(po.readyForNext),
     });
@@ -248,24 +346,74 @@ export function sanitizePublicRoomState(
       });
     }
 
+    let duelDamage: DuelRoundDamage | undefined;
+    if (o.duelDamage && typeof o.duelDamage === 'object') {
+      const dd = o.duelDamage as Record<string, unknown>;
+      const sanitizeHpMap = (rawMap: unknown): Record<string, number> => {
+        const out: Record<string, number> = {};
+        if (rawMap && typeof rawMap === 'object') {
+          for (const [k, v] of Object.entries(rawMap as Record<string, unknown>)) {
+            if (
+              k.length <= 64 &&
+              k !== '__proto__' &&
+              k !== 'constructor' &&
+              k !== 'prototype' &&
+              typeof v === 'number' &&
+              Number.isFinite(v)
+            ) {
+              out[k] = Math.max(0, Math.min(DUEL_STARTING_HP, Math.round(v)));
+            }
+          }
+        }
+        return out;
+      };
+
+      const hpBefore = dd.hpBefore ? sanitizeHpMap(dd.hpBefore) : undefined;
+      const hpAfter = sanitizeHpMap(dd.hpAfter);
+      duelDamage = {
+        multiplier:
+          typeof dd.multiplier === 'number' && Number.isFinite(dd.multiplier)
+            ? Math.max(1, Math.min(15, dd.multiplier))
+            : 1,
+        damage:
+          typeof dd.damage === 'number' && Number.isFinite(dd.damage)
+            ? Math.max(0, Math.min(75_000, Math.round(dd.damage)))
+            : 0,
+        winnerPlayerId:
+          typeof dd.winnerPlayerId === 'string' && dd.winnerPlayerId.length <= 64
+            ? dd.winnerPlayerId
+            : null,
+        loserPlayerId:
+          typeof dd.loserPlayerId === 'string' && dd.loserPlayerId.length <= 64
+            ? dd.loserPlayerId
+            : null,
+        hpBefore,
+        hpAfter,
+      };
+    }
+
     roundHistory.push({
       roundIndex:
         typeof o.roundIndex === 'number' && Number.isFinite(o.roundIndex)
-          ? Math.max(0, Math.min(20, Math.round(o.roundIndex)))
+          ? Math.max(0, Math.min(DUEL_MAX_ROUNDS, Math.round(o.roundIndex)))
           : roundHistory.length,
       actual,
       guesses,
+      duelDamage,
     });
   }
+
+  const maxAllowedRounds = onlineFormat === 'duel' ? DUEL_MAX_ROUNDS : 10;
 
   return {
     code: normalizeInviteCode(r.code).slice(0, 14),
     hostId: r.hostId.slice(0, 64),
+    onlineFormat,
     status: r.status as MultiplayerRoomPublicState['status'],
     regionId: getRegionById(typeof r.regionId === 'string' ? r.regionId : 'world').id,
     totalRounds:
       typeof r.totalRounds === 'number' && Number.isFinite(r.totalRounds)
-        ? Math.max(1, Math.min(10, Math.round(r.totalRounds)))
+        ? Math.max(1, Math.min(maxAllowedRounds, Math.round(r.totalRounds)))
         : 5,
     timerSeconds:
       typeof r.timerSeconds === 'number' && Number.isFinite(r.timerSeconds)
@@ -275,11 +423,20 @@ export function sanitizePublicRoomState(
     currentRoundIndex:
       typeof r.currentRoundIndex === 'number' &&
       Number.isFinite(r.currentRoundIndex)
-        ? Math.max(0, Math.min(10, Math.round(r.currentRoundIndex)))
+        ? Math.max(0, Math.min(DUEL_MAX_ROUNDS, Math.round(r.currentRoundIndex)))
         : 0,
     roundStartedAt:
       typeof r.roundStartedAt === 'number' && Number.isFinite(r.roundStartedAt)
         ? r.roundStartedAt
+        : null,
+    duelCountdownEndsAt:
+      typeof r.duelCountdownEndsAt === 'number' &&
+      Number.isFinite(r.duelCountdownEndsAt)
+        ? r.duelCountdownEndsAt
+        : null,
+    duelWinnerId:
+      typeof r.duelWinnerId === 'string' && r.duelWinnerId.length <= 64
+        ? r.duelWinnerId
         : null,
     currentLocation:
       r.currentLocation === null
@@ -294,6 +451,7 @@ export function createRoom(params: {
   code: string;
   hostId: string;
   hostName: string;
+  onlineFormat?: OnlineFormat;
   regionId: string;
   totalRounds: number;
   timerSeconds: number;
@@ -301,16 +459,23 @@ export function createRoom(params: {
   now?: number;
 }): InternalRoom {
   const cleanName = sanitizePlayerName(params.hostName, 'Игрок 1');
+  const onlineFormat: OnlineFormat = params.onlineFormat === 'duel' ? 'duel' : 'classic';
   return {
     code: params.code,
     hostId: params.hostId,
+    onlineFormat,
     status: 'lobby',
     regionId: getRegionById(params.regionId).id,
-    totalRounds: Math.max(1, Math.min(10, Math.round(params.totalRounds || 5))),
+    totalRounds:
+      onlineFormat === 'duel'
+        ? DUEL_MAX_ROUNDS
+        : Math.max(1, Math.min(10, Math.round(params.totalRounds || 5))),
     timerSeconds: Math.max(0, Math.min(300, Math.round(params.timerSeconds || 0))),
     movementMode: params.movementMode,
     currentRoundIndex: 0,
     roundStartedAt: null,
+    duelCountdownEndsAt: null,
+    duelWinnerId: null,
     currentLocation: null,
     players: [
       {
@@ -320,6 +485,7 @@ export function createRoom(params: {
         isHost: true,
         connected: true,
         totalScore: 0,
+        hp: DUEL_STARTING_HP,
         hasGuessedCurrentRound: false,
         readyForNext: false,
         currentGuess: null,
@@ -344,8 +510,15 @@ export function joinRoom(
     return { ok: true, player: existing };
   }
 
-  if (room.players.length >= 6) {
-    return { ok: false, error: 'Комната заполнена (максимум 6 игроков).' };
+  const maxPlayers = room.onlineFormat === 'duel' ? 2 : 6;
+  if (room.players.length >= maxPlayers) {
+    return {
+      ok: false,
+      error:
+        room.onlineFormat === 'duel'
+          ? 'В дуэли участвуют только 2 игрока (1 на 1).'
+          : 'Комната заполнена (максимум 6 игроков).',
+    };
   }
 
   if (room.status !== 'lobby') {
@@ -365,6 +538,7 @@ export function joinRoom(
     isHost: false,
     connected: true,
     totalScore: 0,
+    hp: DUEL_STARTING_HP,
     hasGuessedCurrentRound: false,
     readyForNext: false,
     currentGuess: null,
@@ -399,23 +573,39 @@ export function startLocatingRound(
   if (room.status !== 'lobby' && room.status !== 'round_result') {
     return { ok: false, error: 'Невозможно начать раунд в текущем состоянии.' };
   }
-  if (room.status === 'round_result') {
-    if (room.currentRoundIndex + 1 >= room.totalRounds) {
+  if (room.status === 'lobby') {
+    if (room.onlineFormat === 'duel' && room.players.length < 2) {
+      return { ok: false, error: 'Для начала дуэли нужен второй игрок.' };
+    }
+    room.currentRoundIndex = 0;
+    room.roundHistory = [];
+    room.duelWinnerId = null;
+    for (const p of room.players) {
+      p.totalScore = 0;
+      p.hp = DUEL_STARTING_HP;
+    }
+  } else if (room.status === 'round_result') {
+    const duelEnded =
+      room.onlineFormat === 'duel' &&
+      (room.duelWinnerId !== null ||
+        room.players.some((p) => p.hp <= 0) ||
+        room.currentRoundIndex + 1 >= DUEL_MAX_ROUNDS);
+
+    if (
+      duelEnded ||
+      (room.onlineFormat === 'classic' &&
+        room.currentRoundIndex + 1 >= room.totalRounds)
+    ) {
       room.status = 'gameover';
       return { ok: true };
     }
     room.currentRoundIndex += 1;
-  } else {
-    room.currentRoundIndex = 0;
-    room.roundHistory = [];
-    for (const p of room.players) {
-      p.totalScore = 0;
-    }
   }
 
   room.status = 'locating';
   room.currentLocation = null;
   room.roundStartedAt = null;
+  room.duelCountdownEndsAt = null;
   for (const p of room.players) {
     p.hasGuessedCurrentRound = false;
     p.readyForNext = false;
@@ -440,6 +630,7 @@ export function setRoundLocation(
   room.currentLocation = location;
   room.status = 'playing';
   room.roundStartedAt = now;
+  room.duelCountdownEndsAt = null;
   return { ok: true };
 }
 
@@ -449,6 +640,7 @@ export function submitPlayerGuess(
   guess: LatLng | null,
   timeSpentSec: number,
   distanceFn: (a: LatLng, b: LatLng) => number = calculateDistanceKm,
+  now: number = Date.now(),
 ): { ok: boolean; roundCompleted: boolean; error?: string } {
   if (room.status !== 'playing' || !room.currentLocation) {
     return { ok: false, roundCompleted: false, error: 'Раунд сейчас не активен.' };
@@ -479,11 +671,42 @@ export function submitPlayerGuess(
     activePlayers.length > 0 && activePlayers.every((p) => p.hasGuessedCurrentRound);
 
   if (allGuessed) {
+    room.duelCountdownEndsAt = null;
     finalizeCurrentRound(room, distanceFn);
     return { ok: true, roundCompleted: true };
   }
 
+  // Authentic GeoGuessr Duel mechanic: once the first duelist locks in their guess,
+  // start a 15-second pressure countdown for the opponent.
+  if (room.onlineFormat === 'duel' && room.duelCountdownEndsAt === null) {
+    room.duelCountdownEndsAt = now + DUEL_LOCKOUT_SECONDS * 1000;
+  }
+
   return { ok: true, roundCompleted: false };
+}
+
+/**
+ * Host helper: when the 15-second duel pressure countdown expires, finalize any
+ * player who has not locked in a guess yet as a timed-out (0 pt) round.
+ */
+export function expirePendingDuelGuesses(
+  room: InternalRoom,
+  requesterId: string,
+  distanceFn: (a: LatLng, b: LatLng) => number = calculateDistanceKm,
+): { ok: boolean; roundCompleted: boolean } {
+  if (room.hostId !== requesterId || room.status !== 'playing') {
+    return { ok: false, roundCompleted: false };
+  }
+  for (const p of room.players) {
+    if (!p.hasGuessedCurrentRound) {
+      p.hasGuessedCurrentRound = true;
+      p.currentGuess = null;
+      p.currentTimeSpentSec = DUEL_LOCKOUT_SECONDS;
+    }
+  }
+  room.duelCountdownEndsAt = null;
+  finalizeCurrentRound(room, distanceFn);
+  return { ok: true, roundCompleted: true };
 }
 
 export function finalizeCurrentRound(
@@ -492,10 +715,12 @@ export function finalizeCurrentRound(
 ): RoundOutcome | null {
   if (!room.currentLocation) return null;
   const actual = room.currentLocation;
+  const mapSizeMeters = getRegionMapSizeMeters(getRegionById(room.regionId));
 
   const guesses: PlayerGuess[] = room.players.map((p) => {
     const distanceKm = p.currentGuess ? distanceFn(actual, p.currentGuess) : null;
-    const score = distanceKm !== null ? calculateGeoScore(distanceKm) : 0;
+    const score =
+      distanceKm !== null ? calculateGeoScore(distanceKm, mapSizeMeters) : 0;
     p.totalScore += score;
     return {
       playerId: p.id,
@@ -508,10 +733,33 @@ export function finalizeCurrentRound(
     };
   });
 
+  let duelDamage: DuelRoundDamage | undefined;
+  if (room.onlineFormat === 'duel' && guesses.length >= 2) {
+    const currentHp: Record<string, number> = {};
+    for (const p of room.players) {
+      currentHp[p.id] = p.hp;
+    }
+    const resolved = resolveDuelRoundDamage(
+      guesses,
+      currentHp,
+      room.currentRoundIndex,
+    );
+    duelDamage = resolved.duelDamage;
+    for (const p of room.players) {
+      if (typeof duelDamage.hpAfter[p.id] === 'number') {
+        p.hp = duelDamage.hpAfter[p.id];
+      }
+    }
+    if (resolved.knockoutWinnerId) {
+      room.duelWinnerId = resolved.knockoutWinnerId;
+    }
+  }
+
   const outcome: RoundOutcome = {
     roundIndex: room.currentRoundIndex,
     actual,
     guesses,
+    duelDamage,
   };
 
   room.roundHistory.push(outcome);
@@ -541,9 +789,12 @@ export function resetRoomToLobby(
   room.currentRoundIndex = 0;
   room.currentLocation = null;
   room.roundStartedAt = null;
+  room.duelCountdownEndsAt = null;
+  room.duelWinnerId = null;
   room.roundHistory = [];
   for (const p of room.players) {
     p.totalScore = 0;
+    p.hp = DUEL_STARTING_HP;
     p.hasGuessedCurrentRound = false;
     p.readyForNext = false;
     p.currentGuess = null;
@@ -573,6 +824,7 @@ export function toPublicRoomState(room: InternalRoom): MultiplayerRoomPublicStat
   return {
     code: room.code,
     hostId: room.hostId,
+    onlineFormat: room.onlineFormat,
     status: room.status,
     regionId: room.regionId,
     totalRounds: room.totalRounds,
@@ -580,6 +832,8 @@ export function toPublicRoomState(room: InternalRoom): MultiplayerRoomPublicStat
     movementMode: room.movementMode,
     currentRoundIndex: room.currentRoundIndex,
     roundStartedAt: room.roundStartedAt,
+    duelCountdownEndsAt: room.duelCountdownEndsAt,
+    duelWinnerId: room.duelWinnerId,
     currentLocation: publicLocation,
     players: room.players.map((p) => ({
       id: p.id,
@@ -588,6 +842,7 @@ export function toPublicRoomState(room: InternalRoom): MultiplayerRoomPublicStat
       isHost: p.isHost,
       connected: p.connected,
       totalScore: p.totalScore,
+      hp: p.hp,
       hasGuessedCurrentRound: p.hasGuessedCurrentRound,
       readyForNext: p.readyForNext,
     })),
